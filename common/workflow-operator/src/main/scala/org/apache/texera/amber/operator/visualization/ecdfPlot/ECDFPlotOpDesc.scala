@@ -53,7 +53,7 @@ class ECDFPlotOpDesc extends PythonOperatorDescriptor {
 
   @JsonProperty(required = false)
   @JsonSchemaTitle("SeparateBy Column")
-  @JsonPropertyDescription("Optional column for splitting ECDF plots into facets.")
+  @JsonPropertyDescription("Optional column for splitting ECDF plots into subplots.")
   @AutofillAttributeName
   var separateBy: EncodableString = ""
 
@@ -67,7 +67,10 @@ class ECDFPlotOpDesc extends PythonOperatorDescriptor {
 
   @JsonProperty(required = false, defaultValue = "standard")
   @JsonSchemaTitle("CDF Mode")
-  @JsonPropertyDescription("Standard, reversed, or complementary ECDF mode.")
+  @JsonPropertyDescription(
+    "'standard' shows P(X ≤ x), 'reversed' shows P(X ≥ x), " +
+      "'complementary' shows 1 - P(X ≤ x)."
+  )
   @JsonSchemaInject(
     json = """{ "enum": ["standard", "reversed", "complementary"], "default": "standard" }"""
   )
@@ -81,13 +84,8 @@ class ECDFPlotOpDesc extends PythonOperatorDescriptor {
 
   @JsonProperty(required = false, defaultValue = "false")
   @JsonSchemaTitle("Show Markers")
-  @JsonPropertyDescription("Whether to display sample markers on the ECDF trace.")
+  @JsonPropertyDescription("Display sample markers on the ECDF line.")
   var showMarkers: Boolean = false
-
-  @JsonProperty(required = false, defaultValue = "true")
-  @JsonSchemaTitle("Show Lines")
-  @JsonPropertyDescription("Whether to display connecting ECDF lines.")
-  var showLines: Boolean = true
 
   @JsonProperty(required = false, defaultValue = "")
   @JsonSchemaTitle("Marginal Plot")
@@ -147,7 +145,6 @@ class ECDFPlotOpDesc extends PythonOperatorDescriptor {
     if (cdfMode != "standard") args += pyb"ecdfmode=$cdfMode"
     if (orientation == "horizontal") args += pyb"orientation='h'"
     if (showMarkers) args += pyb"markers=True"
-    if (!showLines) args += pyb"lines=False"
     if (marginal.nonEmpty) args += pyb"marginal=$marginal"
 
     val joinedArgs = args.mkString(", ")
