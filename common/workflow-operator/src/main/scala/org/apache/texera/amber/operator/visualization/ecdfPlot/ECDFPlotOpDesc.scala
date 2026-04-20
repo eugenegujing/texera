@@ -52,7 +52,7 @@ class ECDFPlotOpDesc extends PythonOperatorDescriptor {
   var colorColumn: EncodableString = ""
 
   @JsonProperty(required = false)
-  @JsonSchemaTitle("SeparateBy Column")
+  @JsonSchemaTitle("Separate By Column")
   @JsonPropertyDescription("Optional column for splitting ECDF plots into subplots.")
   @AutofillAttributeName
   var separateBy: EncodableString = ""
