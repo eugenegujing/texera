@@ -44,7 +44,6 @@ class ECDFPlotOpDescSpec extends AnyFlatSpec with BeforeAndAfter {
     opDesc.cdfMode = "reversed"
     opDesc.orientation = "horizontal"
     opDesc.showMarkers = true
-    opDesc.showLines = false
     opDesc.marginal = "histogram"
 
     val plain = opDesc.createPlotlyFigure().plain
@@ -54,7 +53,6 @@ class ECDFPlotOpDescSpec extends AnyFlatSpec with BeforeAndAfter {
     assert(plain.contains("ecdfmode=self.decode_python_template"))
     assert(plain.contains("orientation='h'"))
     assert(plain.contains("markers=True"))
-    assert(plain.contains("lines=False"))
     assert(plain.contains("marginal=self.decode_python_template"))
     assert(plain.contains("x=self.decode_python_template"))
     assert(plain.contains("color=self.decode_python_template"))

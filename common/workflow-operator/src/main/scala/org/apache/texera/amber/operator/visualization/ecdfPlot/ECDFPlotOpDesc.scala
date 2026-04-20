@@ -22,8 +22,7 @@ package org.apache.texera.amber.operator.visualization.ecdfPlot
 import com.fasterxml.jackson.annotation.{JsonProperty, JsonPropertyDescription}
 import com.kjetland.jackson.jsonSchema.annotations.{JsonSchemaInject, JsonSchemaTitle}
 import org.apache.texera.amber.core.tuple.{AttributeType, Schema}
-import org.apache.texera.amber.core.workflow.OutputPort.OutputMode
-import org.apache.texera.amber.core.workflow.{InputPort, OutputPort, PortIdentity}
+import org.apache.texera.amber.core.workflow.PortIdentity
 import org.apache.texera.amber.operator.PythonOperatorDescriptor
 import org.apache.texera.amber.operator.metadata.annotations.AutofillAttributeName
 import org.apache.texera.amber.operator.metadata.{OperatorGroupConstants, OperatorInfo}
@@ -87,19 +86,19 @@ class ECDFPlotOpDesc extends PythonOperatorDescriptor {
   @JsonPropertyDescription("Display sample markers on the ECDF line.")
   var showMarkers: Boolean = false
 
-  @JsonProperty(required = false, defaultValue = "")
+  @JsonProperty(required = false, defaultValue = "none")
   @JsonSchemaTitle("Marginal Plot")
   @JsonPropertyDescription("Optional marginal plot to display alongside the ECDF.")
-  @JsonSchemaInject(json = """{ "enum": ["", "histogram", "rug"], "default": "" }""")
-  var marginal: EncodableString = ""
+  @JsonSchemaInject(
+    json = """{ "enum": ["none", "histogram", "rug"], "default": "none" }"""
+  )
+  var marginal: EncodableString = "none"
 
   override def operatorInfo: OperatorInfo =
-    OperatorInfo(
+    OperatorInfo.forVisualization(
       "Empirical Cumulative Distribution Plot",
       "Visualize the empirical cumulative distribution of a numeric column.",
-      OperatorGroupConstants.VISUALIZATION_STATISTICAL_GROUP,
-      inputPorts = List(InputPort()),
-      outputPorts = List(OutputPort(mode = OutputMode.SINGLE_SNAPSHOT))
+      OperatorGroupConstants.VISUALIZATION_STATISTICAL_GROUP
     )
 
   override def getOutputSchemas(
@@ -145,7 +144,7 @@ class ECDFPlotOpDesc extends PythonOperatorDescriptor {
     if (cdfMode != "standard") args += pyb"ecdfmode=$cdfMode"
     if (orientation == "horizontal") args += pyb"orientation='h'"
     if (showMarkers) args += pyb"markers=True"
-    if (marginal.nonEmpty) args += pyb"marginal=$marginal"
+    if (marginal != "none") args += pyb"marginal=$marginal"
 
     val joinedArgs = args.mkString(", ")
     pyb"""
