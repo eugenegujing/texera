@@ -17,7 +17,10 @@
  * under the License.
  */
 
-export * from "./workflow";
-export * from "./execution";
-export * from "./agent";
-export * from "./dataguard";
+// In-memory tabular dataset view shared across the DataGuard tools
+// (profile_dataset / suggest_fix / apply_fix). Source-agnostic: rows can come
+// from a parsed CSV, a Texera operator result, or a fixture used in tests.
+export interface DatasetView {
+  columns: string[];
+  rows: Record<string, unknown>[];
+}
