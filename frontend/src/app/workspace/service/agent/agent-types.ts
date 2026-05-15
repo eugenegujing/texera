@@ -78,4 +78,25 @@ export interface ReActStep {
   beforeWorkflowContent?: any;
   /** Workflow state after this step executed */
   afterWorkflowContent?: any;
+  /**
+   * DataGuard: a mutating tool is awaiting user approval. When this field is
+   * set, the chat panel renders the permission-prompt UI (Allow / Deny /
+   * Modify / Allow & remember). The agent's ReAct loop is paused server-side
+   * until a WS {type:"decision", stepId, verdict} message resolves it.
+   */
+  pendingApproval?: {
+    toolName: string;
+    riskTier: "low" | "medium" | "high";
+    proposal: {
+      issueId: string;
+      issueType: string;
+      action: string;
+      operationKind: string;
+      operationParams: Record<string, unknown>;
+      reason: string;
+      evidence: string;
+      confidence: "low" | "medium" | "high";
+      targetRowCount: number;
+    };
+  };
 }

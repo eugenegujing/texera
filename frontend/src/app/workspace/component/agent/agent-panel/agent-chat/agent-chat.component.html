@@ -123,6 +123,13 @@
               style="color: #8c8c8c; font-style: italic">
               Execute {{ response.toolCalls.length }} tool{{ response.toolCalls.length > 1 ? 's' : '' }}
             </div>
+            <!-- DataGuard permission prompt: only renders when the step is
+                 awaiting user authorization. -->
+            <texera-permission-prompt
+              *ngIf="response.pendingApproval"
+              [step]="response"
+              [agentId]="agentInfo.id">
+            </texera-permission-prompt>
 
             <!-- Details button (shown on hover) - for any message with details -->
             <button

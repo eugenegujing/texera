@@ -59,6 +59,7 @@ import { NzTabsComponent, NzTabComponent } from "ng-zorro-antd/tabs";
 import { NzInputNumberComponent } from "ng-zorro-antd/input-number";
 import { NzTagComponent } from "ng-zorro-antd/tag";
 import { NzSwitchComponent } from "ng-zorro-antd/switch";
+import { PermissionPromptComponent } from "../permission-prompt/permission-prompt.component";
 
 @UntilDestroy()
 @Component({
@@ -89,6 +90,7 @@ import { NzSwitchComponent } from "ng-zorro-antd/switch";
     NzInputGroupComponent,
     NzInputGroupWhitSuffixOrPrefixDirective,
     NzSwitchComponent,
+    PermissionPromptComponent,
   ],
 })
 export class AgentChatComponent implements OnInit, AfterViewChecked, OnDestroy, OnChanges {

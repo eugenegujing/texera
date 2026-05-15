@@ -966,6 +966,38 @@ export class AgentService {
   }
 
   /**
+   * DataGuard: send the user's verdict on a pending-approval step.
+   * Resolves the awaiting tool execution server-side and lets the ReAct loop
+   * continue. `remember` (when verdict === "allow") registers an auto-allow
+   * rule for the issueType so subsequent matching issues skip the prompt.
+   */
+  public sendDecision(
+    agentId: string,
+    stepId: string,
+    verdict: "allow" | "deny" | "modify",
+    options: { modifiedAction?: string; remember?: boolean } = {}
+  ): void {
+    const tracking = this.agentStateTracking.get(agentId);
+    if (!tracking?.websocket || tracking.websocket.readyState !== WebSocket.OPEN) {
+      console.error(`Agent ${agentId}: cannot send decision — WebSocket not open`);
+      return;
+    }
+    try {
+      tracking.websocket.send(
+        JSON.stringify({
+          type: "decision",
+          stepId,
+          verdict,
+          modifiedAction: options.modifiedAction,
+          remember: options.remember,
+        })
+      );
+    } catch (error) {
+      console.error("Failed to send DataGuard decision:", error);
+    }
+  }
+
+  /**
    * Stop generation for an agent via WebSocket.
    */
   public stopGeneration(agentId: string): void {

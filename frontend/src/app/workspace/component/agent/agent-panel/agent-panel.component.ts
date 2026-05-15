@@ -21,6 +21,7 @@ import { Component, HostListener, Input, OnDestroy, OnInit, OnChanges, SimpleCha
 import { UntilDestroy, untilDestroyed } from "@ngneat/until-destroy";
 import { NzResizeEvent, NzResizableDirective, NzResizeHandlesComponent } from "ng-zorro-antd/resizable";
 import { AgentService, AgentInfo } from "../../../service/agent/agent.service";
+import { DataGuardAutoTriggerService } from "../../../service/agent/data-guard-auto-trigger.service";
 import { WorkflowActionService } from "../../../service/workflow-graph/model/workflow-action.service";
 import { NotificationService } from "../../../../common/service/notification/notification.service";
 import { calculateTotalTranslate3d } from "../../../../common/util/panel-dock";
@@ -98,7 +99,8 @@ export class AgentPanelComponent implements OnInit, OnDestroy, OnChanges {
   constructor(
     private agentService: AgentService,
     private workflowActionService: WorkflowActionService,
-    private notificationService: NotificationService
+    private notificationService: NotificationService,
+    private dataGuardAutoTrigger: DataGuardAutoTriggerService
   ) {}
 
   ngOnInit(): void {
@@ -124,6 +126,21 @@ export class AgentPanelComponent implements OnInit, OnDestroy, OnChanges {
         this.agents = agents;
         // Try to activate the agent if agentIdToActivate is set
         this.tryActivateAgentFromInput();
+      });
+
+    // DataGuard auto-trigger: when a dataset-reading operator is added to the
+    // workflow, notify the user that DataGuard is ready to scan. Full
+    // integration (create agent + POST /agents/:id/dataguard/dataset + send
+    // initial "scan this dataset" message) is a follow-up that needs the
+    // referenced CSV bytes — for now we surface the trigger so the
+    // §5 storyboard "no manual invocation" beat is in place.
+    this.dataGuardAutoTrigger
+      .getDatasetAddedStream()
+      .pipe(untilDestroyed(this))
+      .subscribe(op => {
+        this.notificationService.info(
+          `DataGuard ready to scan ${op.operatorType}. Open the chat panel and ask "scan this dataset for quality issues".`
+        );
       });
   }
 

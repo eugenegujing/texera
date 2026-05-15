@@ -1,0 +1,78 @@
+.dg-permission {
+  border: 1px solid #e5b800;
+  border-radius: 8px;
+  padding: 12px;
+  margin: 8px 0;
+  background: #fffbe6;
+  font-size: 0.9rem;
+}
+
+.dg-permission--resolved {
+  background: #f0f8ff;
+  border-color: #91d5ff;
+  color: #1890ff;
+  font-style: italic;
+}
+
+.dg-permission__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.dg-permission__tier {
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.dg-permission__tier--low {
+  background: #d9f7be;
+  color: #389e0d;
+}
+
+.dg-permission__tier--medium {
+  background: #fff1b8;
+  color: #d48806;
+}
+
+.dg-permission__tier--high {
+  background: #ffccc7;
+  color: #cf1322;
+}
+
+.dg-permission__body {
+  margin: 8px 0;
+}
+
+.dg-permission__field {
+  margin: 4px 0;
+  line-height: 1.4;
+}
+
+.dg-permission__label {
+  font-weight: 600;
+  display: inline-block;
+  min-width: 90px;
+  color: #595959;
+}
+
+.dg-permission__actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.dg-permission__modify {
+  margin-top: 8px;
+
+  textarea {
+    width: 100%;
+    margin-bottom: 8px;
+  }
+}

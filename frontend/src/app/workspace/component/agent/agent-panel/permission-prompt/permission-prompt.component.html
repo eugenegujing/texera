@@ -1,0 +1,54 @@
+<div class="dg-permission" *ngIf="step.pendingApproval && !submitted">
+  <div class="dg-permission__header">
+    <strong>DataGuard wants to apply this fix</strong>
+    <span class="dg-permission__tier dg-permission__tier--{{step.pendingApproval.riskTier}}">
+      Risk: {{step.pendingApproval.riskTier}}
+    </span>
+  </div>
+
+  <div class="dg-permission__body">
+    <div class="dg-permission__field">
+      <span class="dg-permission__label">Action:</span> {{step.pendingApproval.proposal.action}}
+    </div>
+    <div class="dg-permission__field">
+      <span class="dg-permission__label">Affects:</span> {{step.pendingApproval.proposal.targetRowCount}} row(s)
+    </div>
+    <div class="dg-permission__field">
+      <span class="dg-permission__label">Reason:</span> {{step.pendingApproval.proposal.reason}}
+    </div>
+    <div class="dg-permission__field">
+      <span class="dg-permission__label">Evidence:</span> {{step.pendingApproval.proposal.evidence}}
+    </div>
+    <div class="dg-permission__field">
+      <span class="dg-permission__label">Confidence:</span> {{step.pendingApproval.proposal.confidence}}
+    </div>
+  </div>
+
+  <div class="dg-permission__actions" *ngIf="!isModifying">
+    <button nz-button nzType="primary" (click)="onAllow(false)">Allow</button>
+    <button
+      nz-button
+      *ngIf="step.pendingApproval.riskTier !== 'high'"
+      (click)="onAllow(true)">
+      Allow &amp; don't ask for similar
+    </button>
+    <button nz-button (click)="onDeny()">Deny</button>
+    <button nz-button (click)="openModify()">Modify…</button>
+  </div>
+
+  <div class="dg-permission__modify" *ngIf="isModifying">
+    <textarea
+      nz-input
+      rows="3"
+      [(ngModel)]="modifiedAction"
+      placeholder="Describe the modified action (e.g., 'Flag for manual review instead of impute')"></textarea>
+    <div class="dg-permission__actions">
+      <button nz-button nzType="primary" (click)="submitModify()">Submit modification</button>
+      <button nz-button (click)="cancelModify()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div *ngIf="submitted" class="dg-permission dg-permission--resolved">
+  Decision sent — waiting for the agent to continue.
+</div>
