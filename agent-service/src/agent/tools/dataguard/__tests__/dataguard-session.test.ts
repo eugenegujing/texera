@@ -18,9 +18,9 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { DataGuardSession } from "./dataguard-session";
-import type { DatasetView } from "./dataset";
-import type { DataQualityIssue, FixProposal } from "../../../types/dataguard";
+import { DataGuardSession } from "../dataguard-session";
+import type { DatasetView } from "../dataset";
+import type { DataQualityIssue, FixProposal } from "../../../../types/dataguard";
 
 function makeIssue(): DataQualityIssue {
   return {

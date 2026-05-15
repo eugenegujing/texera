@@ -18,8 +18,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { requestApproval, type ApprovalGateway } from "./with-approval";
-import type { FixProposal, IssueType, PermissionDecision, RiskTier } from "../../../types/dataguard";
+import { requestApproval, type ApprovalGateway } from "../with-approval";
+import type { FixProposal, IssueType, PermissionDecision, RiskTier } from "../../../../types/dataguard";
 
 function makeProposal(overrides: Partial<FixProposal> = {}): FixProposal {
   return {

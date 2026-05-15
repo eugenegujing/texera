@@ -18,8 +18,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { profileDataset } from "./profile-dataset";
-import type { DatasetView } from "./dataset";
+import { profileDataset } from "../profile-dataset";
+import type { DatasetView } from "../dataset";
 
 describe("profileDataset", () => {
   test("clean dataset → empty issue list", () => {

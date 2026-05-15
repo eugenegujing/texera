@@ -18,8 +18,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { computeBiasCheck } from "./bias-check";
-import type { DatasetView } from "./dataset";
+import { computeBiasCheck } from "../bias-check";
+import type { DatasetView } from "../dataset";
 
 describe("computeBiasCheck", () => {
   test("identical before/after → 100% retention, no skew", () => {

@@ -18,8 +18,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { serializeDecisionLogCsv } from "./decision-log";
-import type { DecisionLogEntry } from "../../../types/dataguard";
+import { serializeDecisionLogCsv } from "../decision-log";
+import type { DecisionLogEntry } from "../../../../types/dataguard";
 
 function entry(overrides: Partial<DecisionLogEntry> = {}): DecisionLogEntry {
   return {

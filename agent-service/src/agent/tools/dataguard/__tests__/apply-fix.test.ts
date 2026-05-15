@@ -18,9 +18,9 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { applyFix } from "./apply-fix";
-import type { DatasetView } from "./dataset";
-import type { FixProposal } from "../../../types/dataguard";
+import { applyFix } from "../apply-fix";
+import type { DatasetView } from "../dataset";
+import type { FixProposal } from "../../../../types/dataguard";
 
 function makeProposal(overrides: Partial<FixProposal> = {}): FixProposal {
   return {

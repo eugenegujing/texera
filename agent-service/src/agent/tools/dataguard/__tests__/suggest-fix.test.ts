@@ -18,8 +18,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { suggestFix, type LlmCallFn } from "./suggest-fix";
-import type { DataQualityIssue } from "../../../types/dataguard";
+import { suggestFix, type LlmCallFn } from "../suggest-fix";
+import type { DataQualityIssue } from "../../../../types/dataguard";
 
 function makeIssue(overrides: Partial<DataQualityIssue> = {}): DataQualityIssue {
   return {
