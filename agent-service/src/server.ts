@@ -325,6 +325,40 @@ const agentsRouter = new Elysia({ prefix: "/agents" })
     };
   })
 
+  // ---------- DataGuard endpoints ----------
+
+  .post(
+    "/:id/dataguard/dataset",
+    ({ params: { id }, body }) => {
+      const agent = getAgent(id);
+      agent.setDataGuardDataset({
+        columns: body.columns,
+        rows: body.rows,
+      });
+      return { ok: true, columns: body.columns.length, rows: body.rows.length };
+    },
+    {
+      body: t.Object({
+        columns: t.Array(t.String()),
+        rows: t.Array(t.Record(t.String(), t.Any())),
+      }),
+    }
+  )
+
+  .get("/:id/dataguard/session", ({ params: { id } }) => {
+    const agent = getAgent(id);
+    const session = agent.getDataGuardSession();
+    const dataset = session.getDataset();
+    return {
+      datasetRowCount: dataset?.rows.length ?? 0,
+      datasetColumnCount: dataset?.columns.length ?? 0,
+      issues: session.getIssues(),
+      decisionLog: session.getDecisionLog(),
+      flaggedRows: session.getFlaggedRows(),
+      autoAllowRules: session.getAutoAllowRules(),
+    };
+  })
+
   .get("/:id/operator-types", ({ params: { id } }) => {
     const agent = getAgent(id);
     const metadataStore = agent.getMetadataStore();
@@ -403,9 +437,15 @@ const agentsRouter = new Elysia({ prefix: "/agents" })
   );
 
 interface WsMessage {
-  type: "message" | "stop";
+  type: "message" | "stop" | "decision";
   content?: string;
   messageSource?: "chat" | "feedback";
+  // Fields below carry the user's verdict on a pending-approval step.
+  // Used when type === "decision". See agent/tools/dataguard/with-approval.ts.
+  stepId?: string;
+  verdict?: "allow" | "deny" | "modify";
+  modifiedAction?: string;
+  remember?: boolean;
 }
 
 interface OperatorResultSummaryWs {
@@ -529,6 +569,29 @@ export function buildApp() {
         if (msg.type === "stop") {
           agent.stop();
           broadcastToAgent(agentId, { type: "state", state: "STOPPING" });
+          return;
+        }
+
+        if (msg.type === "decision") {
+          if (!msg.stepId || !msg.verdict) {
+            ws.send(
+              JSON.stringify({
+                type: "error",
+                error: "decision requires stepId and verdict",
+              })
+            );
+            return;
+          }
+          const resolved = agent.resolveDecision(msg.stepId, {
+            stepId: msg.stepId,
+            verdict: msg.verdict,
+            modifiedAction: msg.modifiedAction,
+            remember: msg.remember,
+          });
+          wsLog.info(
+            { agentId, stepId: msg.stepId, verdict: msg.verdict, resolved },
+            "received user decision"
+          );
           return;
         }
 

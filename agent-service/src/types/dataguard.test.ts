@@ -68,6 +68,7 @@ describe("DataGuard type shapes", () => {
   test("FixProposal: replace-value, medium risk, high confidence", () => {
     const proposal: FixProposal = {
       issueId: "iss-1",
+      issueType: "placeholder_value",
       action: "Replace age = 999 with NULL",
       operationKind: "replace_value",
       operationParams: { column: "age", match: 999, replacement: null },
@@ -85,6 +86,7 @@ describe("DataGuard type shapes", () => {
   test("FixProposal: drop-rows, high risk (the storyboard 'deny' case)", () => {
     const proposal: FixProposal = {
       issueId: "iss-3",
+      issueType: "outlier",
       action: "Drop 3 rows with BMI > 60",
       operationKind: "drop_rows",
       operationParams: { rowIndices: [55, 211, 433] },

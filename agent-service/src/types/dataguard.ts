@@ -64,6 +64,7 @@ export interface DataQualityIssue {
 
 export interface FixProposal {
   issueId: string;
+  issueType: IssueType;
   action: string;
   operationKind: FixOperationKind;
   operationParams: Record<string, unknown>;

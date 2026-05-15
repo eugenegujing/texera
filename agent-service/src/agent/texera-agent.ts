@@ -51,6 +51,16 @@ import { assembleContext } from "./util/context-utils";
 import { compileWorkflowAsync, type WorkflowCompilationResponse } from "../api/compile-api";
 import { createLogger } from "../logger";
 import type { Logger } from "pino";
+import type {
+  FixProposal,
+  IssueType,
+  PermissionDecision,
+} from "../types/dataguard";
+import { DataGuardSession } from "./tools/dataguard/dataguard-session";
+import type { ApprovalGateway } from "./tools/dataguard/with-approval";
+import type { LlmCallFn } from "./tools/dataguard/suggest-fix";
+import { createDataGuardTools } from "./tools/dataguard/dataguard-tools";
+import type { DatasetView } from "./tools/dataguard/dataset";
 
 const PERSIST_DEBOUNCE_MS = 500;
 
@@ -80,8 +90,12 @@ type ReActStepCallback = (step: ReActStep) => void;
  * (`WorkflowResultState`), and the tool surface exposed to the LLM. Each call
  * to `sendMessage` drives one multi-step generation via the Vercel AI SDK,
  * streaming step updates to subscribed websockets.
+ *
+ * Also implements `ApprovalGateway` — DataGuard's mutating tools call
+ * `requestApproval(this, …)` to pause the ReAct loop until the user clicks
+ * Allow / Deny / Modify in the chat panel.
  */
-export class TexeraAgent {
+export class TexeraAgent implements ApprovalGateway {
   readonly agentId: string;
   readonly agentName: string;
   readonly modelType: string;
@@ -124,6 +138,11 @@ export class TexeraAgent {
   private workflowChangeSubscription: Subscription | null = null;
 
   private log: Logger;
+
+  // DataGuard state — see agent/tools/dataguard/
+  private readonly dataGuardSession = new DataGuardSession();
+  private pendingDecisions: Map<string, (d: PermissionDecision) => void> = new Map();
+  private decidedBuffer: Map<string, PermissionDecision> = new Map();
 
   constructor(config: TexeraAgentConfig) {
     this.agentId = config.agentId;
@@ -228,6 +247,24 @@ export class TexeraAgent {
       );
     }
 
+    // DataGuard tools — read-only profile/suggest plus permission-gated apply.
+    const llmCall: LlmCallFn = async (prompt: string) => {
+      const { text } = await generateText({
+        model: this.model,
+        prompt,
+        temperature: 0.2,
+      });
+      return text;
+    };
+    Object.assign(
+      tools,
+      createDataGuardTools({
+        session: this.dataGuardSession,
+        gateway: this,
+        llmCall,
+      })
+    );
+
     return tools;
   }
 
@@ -312,7 +349,9 @@ export class TexeraAgent {
     this.stepCallback = callback;
   }
 
-  private generateStepId(): string {
+  // Public because DataGuard's permission-gating layer needs a fresh step id
+  // for a pending-approval step before any AI SDK step has been minted.
+  public generateStepId(): string {
     return `step-${this.agentId}-${++this.stepCounter}-${Date.now()}`;
   }
 
@@ -823,6 +862,83 @@ export class TexeraAgent {
     return relevantSteps;
   }
 
+  // ============================================================
+  // DataGuard / ApprovalGateway
+  // ============================================================
+
+  public getDataGuardSession(): DataGuardSession {
+    return this.dataGuardSession;
+  }
+
+  public setDataGuardDataset(dataset: DatasetView): void {
+    this.dataGuardSession.setDataset(dataset);
+  }
+
+  // ApprovalGateway: does this issueType have a standing "remember" rule?
+  public matchesAutoAllowRule(issueType: IssueType): boolean {
+    return this.dataGuardSession.matchesAutoAllowRule(issueType);
+  }
+
+  // ApprovalGateway: append a pending-approval step into the history and
+  // broadcast it through the existing stepCallback so the chat panel renders
+  // the prompt UI.
+  public emitPendingApproval(stepId: string, proposal: FixProposal): void {
+    const messageId = this.currentMessageId ?? "<no-message>";
+    const wf = this.workflowState.getWorkflowContent();
+    const step: ReActStep = {
+      id: stepId,
+      parentId: this.head,
+      messageId,
+      stepId: -1,
+      timestamp: Date.now(),
+      role: "agent",
+      content: proposal.action,
+      isBegin: false,
+      isEnd: false,
+      pendingApproval: {
+        toolName: "apply_fix",
+        proposal,
+        riskTier: proposal.riskTier,
+      },
+      beforeWorkflowContent: wf,
+      afterWorkflowContent: wf,
+    };
+    this.addStep(step);
+    this.head = stepId;
+  }
+
+  // ApprovalGateway: wait for the user's decision. Resolves when the server
+  // receives a WS {type:"decision", stepId, …} message and calls resolveDecision.
+  public awaitDecision(stepId: string): Promise<PermissionDecision> {
+    const buffered = this.decidedBuffer.get(stepId);
+    if (buffered) {
+      this.decidedBuffer.delete(stepId);
+      return Promise.resolve(buffered);
+    }
+    return new Promise<PermissionDecision>(resolve => {
+      this.pendingDecisions.set(stepId, resolve);
+    });
+  }
+
+  // Called from the WS handler when the user clicks Allow / Deny / Modify.
+  // Returns true if a waiting tool was unblocked, false if buffered for later.
+  public resolveDecision(stepId: string, decision: PermissionDecision): boolean {
+    if (decision.remember) {
+      // The "Allow & don't ask again" verdict also writes an auto-allow rule.
+      const proposal = this.dataGuardSession.getProposal(extractIssueIdFromStep(this.stepsById, stepId));
+      if (proposal) this.dataGuardSession.addAutoAllowRule(proposal.issueType);
+    }
+    const resolver = this.pendingDecisions.get(stepId);
+    if (resolver) {
+      this.pendingDecisions.delete(stepId);
+      resolver(decision);
+      return true;
+    }
+    // Decision arrived before the tool started awaiting — buffer it.
+    this.decidedBuffer.set(stepId, decision);
+    return false;
+  }
+
   destroy(): void {
     if (this.workflowChangeSubscription) {
       this.workflowChangeSubscription.unsubscribe();
@@ -837,4 +953,12 @@ export class TexeraAgent {
     this.stepsById.clear();
     this.currentMessageId = undefined;
   }
+}
+
+function extractIssueIdFromStep(
+  steps: Map<string, ReActStep>,
+  stepId: string
+): string {
+  const step = steps.get(stepId);
+  return step?.pendingApproval?.proposal.issueId ?? "";
 }

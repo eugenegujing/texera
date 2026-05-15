@@ -18,6 +18,7 @@
  */
 
 import type { WorkflowContent } from "./workflow";
+import type { FixProposal, RiskTier } from "./dataguard";
 
 export enum AgentState {
   UNAVAILABLE = "UNAVAILABLE",
@@ -34,6 +35,12 @@ export interface TokenUsage {
 }
 
 export const INITIAL_STEP_ID = "step-initial";
+
+export interface PendingApproval {
+  toolName: string;
+  proposal: FixProposal;
+  riskTier: RiskTier;
+}
 
 export interface ReActStep {
   id: string;
@@ -60,6 +67,10 @@ export interface ReActStep {
   messageSource?: "chat" | "feedback";
   beforeWorkflowContent?: WorkflowContent;
   afterWorkflowContent?: WorkflowContent;
+  // Present on a step that is awaiting user approval. The agent's ReAct loop
+  // pauses (inside the mutating tool's execute fn) until a decision WS message
+  // arrives. See agent/tools/dataguard/with-approval.ts.
+  pendingApproval?: PendingApproval;
 }
 
 export enum OperatorResultSerializationMode {
