@@ -34,11 +34,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { requestApproval, type ApprovalGateway } from "../with-approval";
-import type {
-  FixProposal,
-  IssueType,
-  PermissionDecision,
-} from "../../../../types/dataguard";
+import type { FixProposal, IssueType, PermissionDecision } from "../../../../types/dataguard";
 
 function makeProposal(overrides: Partial<FixProposal> = {}): FixProposal {
   return {
@@ -109,7 +105,7 @@ describe("requestApproval after Modify cut (#11a)", () => {
     expect(decision).not.toHaveProperty("modifiedAction");
   });
 
-  test("type system rejects a PermissionDecision literal with verdict: \"modify\"", () => {
+  test('type system rejects a PermissionDecision literal with verdict: "modify"', () => {
     // @ts-expect-error "modify" is no longer a Verdict member after #11a.
     const bad: PermissionDecision = { stepId: "x", verdict: "modify" };
     expect(bad.stepId).toBe("x");

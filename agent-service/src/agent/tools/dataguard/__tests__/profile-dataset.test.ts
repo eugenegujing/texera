@@ -80,9 +80,7 @@ describe("profileDataset", () => {
   test("detects 999 as placeholder in numeric column (default placeholder list)", () => {
     const ds: DatasetView = {
       columns: ["age"],
-      rows: [
-        { age: 25 }, { age: 999 }, { age: 30 }, { age: 999 }, { age: 999 },
-      ],
+      rows: [{ age: 25 }, { age: 999 }, { age: 30 }, { age: 999 }, { age: 999 }],
     };
     const issues = profileDataset(ds);
     const ph = issues.find(i => i.issueType === "placeholder_value");
@@ -94,9 +92,7 @@ describe("profileDataset", () => {
   test("custom placeholder list overrides default", () => {
     const ds: DatasetView = {
       columns: ["status"],
-      rows: [
-        { status: "ok" }, { status: "missing" }, { status: "ok" }, { status: "missing" },
-      ],
+      rows: [{ status: "ok" }, { status: "missing" }, { status: "ok" }, { status: "missing" }],
     };
     const issues = profileDataset(ds, { placeholderValues: ["missing"] });
     const ph = issues.find(i => i.issueType === "placeholder_value");
@@ -141,12 +137,7 @@ describe("profileDataset", () => {
   });
 
   test("auto-infer recognizes bare `id`, `*Id`, `id_*` patterns too", () => {
-    const cases: Array<{ col: string }> = [
-      { col: "id" },
-      { col: "userId" },
-      { col: "id_card" },
-      { col: "ID" },
-    ];
+    const cases: Array<{ col: string }> = [{ col: "id" }, { col: "userId" }, { col: "id_card" }, { col: "ID" }];
     for (const { col } of cases) {
       const ds: DatasetView = {
         columns: [col, "value"],
@@ -195,7 +186,10 @@ describe("profileDataset", () => {
     // workflow may legitimately have duplicate categorical labels.
     const ds: DatasetView = {
       columns: ["color", "qty"],
-      rows: [{ color: "red", qty: 1 }, { color: "red", qty: 2 }],
+      rows: [
+        { color: "red", qty: 1 },
+        { color: "red", qty: 2 },
+      ],
     };
     const issues = profileDataset(ds);
     expect(issues.find(i => i.issueType === "duplicate_id")).toBeUndefined();
@@ -213,9 +207,7 @@ describe("profileDataset", () => {
   test("validRanges → detects outlier values", () => {
     const ds: DatasetView = {
       columns: ["bmi"],
-      rows: [
-        { bmi: 25.5 }, { bmi: 65 }, { bmi: 72 }, { bmi: 22 },
-      ],
+      rows: [{ bmi: 25.5 }, { bmi: 65 }, { bmi: 72 }, { bmi: 22 }],
     };
     const issues = profileDataset(ds, { validRanges: { bmi: { min: 10, max: 60 } } });
     const outlier = issues.find(i => i.issueType === "outlier");
@@ -340,9 +332,7 @@ describe("profileDataset", () => {
     test("skips column with fewer than outlierMinObservations numeric values", () => {
       // Quartiles aren't meaningful on a tiny sample, so the auto-IQR branch
       // bails. Default min-obs is 10; we feed 5.
-      const rows: Array<Record<string, unknown>> = [
-        { v: 1 }, { v: 2 }, { v: 3 }, { v: 4 }, { v: 1000 },
-      ];
+      const rows: Array<Record<string, unknown>> = [{ v: 1 }, { v: 2 }, { v: 3 }, { v: 4 }, { v: 1000 }];
       const issues = profileDataset({ columns: ["v"], rows }, { enableOutlierDetection: true });
       expect(issues.find(i => i.issueType === "outlier")).toBeUndefined();
     });
@@ -464,10 +454,7 @@ describe("profileDataset", () => {
       for (let i = 0; i < 25; i++) rows.push({ tag: `tag${i}` });
       // Add a clear inconsistency for the 26th distinct group — but we exceed the cap.
       rows.push({ tag: "tag1 " }); // would collide with "tag1" if checked
-      const issues = profileDataset(
-        { columns: ["tag"], rows },
-        { inconsistentLabelMaxCardinality: 20 }
-      );
+      const issues = profileDataset({ columns: ["tag"], rows }, { inconsistentLabelMaxCardinality: 20 });
       expect(issues.find(i => i.issueType === "inconsistent_label")).toBeUndefined();
     });
 
@@ -483,9 +470,7 @@ describe("profileDataset", () => {
     test("does not flag when all spellings agree (genuine low-cardinality categorical)", () => {
       const ds: DatasetView = {
         columns: ["group"],
-        rows: [
-          { group: "A" }, { group: "A" }, { group: "A" }, { group: "B" }, { group: "B" },
-        ],
+        rows: [{ group: "A" }, { group: "A" }, { group: "A" }, { group: "B" }, { group: "B" }],
       };
       const issues = profileDataset(ds);
       expect(issues.find(i => i.issueType === "inconsistent_label")).toBeUndefined();
@@ -597,7 +582,7 @@ describe("profileDataset", () => {
     //
     // The fix collapses both representations to the bare `null` token via
     // the shared `isMissing` predicate so the two sides agree.
-    test("regression: explicit-null cell and Jackson-asText `\"null\"` string fingerprint identically (JSONL round 6)", () => {
+    test('regression: explicit-null cell and Jackson-asText `"null"` string fingerprint identically (JSONL round 6)', () => {
       const profilerRow = { score: null as unknown, user: "Grace" };
       const texeraRow = { score: "null", user: "Grace" };
       const a = rowFingerprint(profilerRow, ["score", "user"]);
@@ -640,10 +625,7 @@ describe("profileDataset", () => {
       // neither indices nor keys are emitted — preserves the existing
       // maybeIndices behaviour.
       const rows = Array.from({ length: 100 }, () => ({ x: null }));
-      const issues = profileDataset(
-        { columns: ["x"], rows },
-        { maxIndicesInIssue: 10 }
-      );
+      const issues = profileDataset({ columns: ["x"], rows }, { maxIndicesInIssue: 10 });
       const miss = issues.find(i => i.issueType === "missing_value");
       expect(miss!.affectedRowIndices).toBeUndefined();
       expect(miss!.affectedRowKeys).toBeUndefined();

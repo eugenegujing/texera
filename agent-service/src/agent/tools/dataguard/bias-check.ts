@@ -115,7 +115,7 @@ export function createBiasCheckTool(session: DataGuardSession) {
         .optional()
         .describe("Optional explicit 'before' dataset; if omitted, the tool cannot compute bias and returns an error."),
     }),
-    execute: async (input) => {
+    execute: async input => {
       const after = session.getDataset();
       if (!after) return "[ERROR] No dataset in session; load one before calling bias_check.";
       const before = input.beforeDataset ?? null;

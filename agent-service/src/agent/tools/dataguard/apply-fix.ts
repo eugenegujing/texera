@@ -40,11 +40,7 @@ export interface ApplyOptions {
   missingTokens?: string[];
 }
 
-export function applyFix(
-  dataset: DatasetView,
-  proposal: FixProposal,
-  options: ApplyOptions = {}
-): ApplyResult {
+export function applyFix(dataset: DatasetView, proposal: FixProposal, options: ApplyOptions = {}): ApplyResult {
   const rows = dataset.rows.map(r => ({ ...r }));
   let columns = [...dataset.columns];
   const params = proposal.operationParams;

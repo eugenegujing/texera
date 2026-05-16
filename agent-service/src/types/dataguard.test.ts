@@ -177,12 +177,7 @@ describe("DataGuard type shapes", () => {
       "trim_whitespace",
       "rename_column",
     ];
-    const verdicts: Verdict[] = [
-      "allow",
-      "deny",
-      "auto_allow_low_risk",
-      "auto_allow_remembered",
-    ];
+    const verdicts: Verdict[] = ["allow", "deny", "auto_allow_low_risk", "auto_allow_remembered"];
     expect(risks).toHaveLength(4);
     expect(confidences).toHaveLength(3);
     expect(issueTypes).toHaveLength(5);

@@ -39,10 +39,7 @@ export interface ApprovalGateway {
   awaitDecision(stepId: string): Promise<PermissionDecision>;
 }
 
-export async function requestApproval(
-  gateway: ApprovalGateway,
-  proposal: FixProposal
-): Promise<PermissionDecision> {
+export async function requestApproval(gateway: ApprovalGateway, proposal: FixProposal): Promise<PermissionDecision> {
   // `high` and `warning` ALWAYS prompt — the "remember" rule does not apply.
   // This is the same shape Claude Code uses for destructive Bash operations.
   //

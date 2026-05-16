@@ -66,7 +66,7 @@ beforeEach(() => {
 });
 
 describe(`POST ${API}/agents/:id/dataguard/apply-batch — Modify verdict cut (#11a)`, () => {
-  test("rejects verdict: \"modify\" with a 4xx body-schema error", async () => {
+  test('rejects verdict: "modify" with a 4xx body-schema error', async () => {
     const id = await createAgent();
     const res = await postJson(`${API}/agents/${id}/dataguard/apply-batch`, {
       decisions: [{ issueId: "iss-1", verdict: "modify" }],
@@ -78,15 +78,13 @@ describe(`POST ${API}/agents/:id/dataguard/apply-batch — Modify verdict cut (#
   test("rejects unknown field `modifiedAction` on a decision entry", async () => {
     const id = await createAgent();
     const res = await postJson(`${API}/agents/${id}/dataguard/apply-batch`, {
-      decisions: [
-        { issueId: "iss-1", verdict: "allow", modifiedAction: "Flag instead of replace" },
-      ],
+      decisions: [{ issueId: "iss-1", verdict: "allow", modifiedAction: "Flag instead of replace" }],
     });
     expect(res.status).toBeGreaterThanOrEqual(400);
     expect(res.status).toBeLessThan(500);
   });
 
-  test("still accepts verdict: \"allow\" (baseline — parity check that the cut didn't over-reach)", async () => {
+  test('still accepts verdict: "allow" (baseline — parity check that the cut didn\'t over-reach)', async () => {
     const id = await createAgent();
     const res = await postJson(`${API}/agents/${id}/dataguard/apply-batch`, {
       decisions: [{ issueId: "iss-not-loaded", verdict: "allow" }],
@@ -97,7 +95,7 @@ describe(`POST ${API}/agents/:id/dataguard/apply-batch — Modify verdict cut (#
     expect(res.status).toBe(200);
   });
 
-  test("still accepts verdict: \"deny\" (baseline)", async () => {
+  test('still accepts verdict: "deny" (baseline)', async () => {
     const id = await createAgent();
     const res = await postJson(`${API}/agents/${id}/dataguard/apply-batch`, {
       decisions: [{ issueId: "iss-not-loaded", verdict: "deny" }],
@@ -105,7 +103,7 @@ describe(`POST ${API}/agents/:id/dataguard/apply-batch — Modify verdict cut (#
     expect(res.status).toBe(200);
   });
 
-  test("rejects a mixed batch where ANY decision uses verdict: \"modify\"", async () => {
+  test('rejects a mixed batch where ANY decision uses verdict: "modify"', async () => {
     const id = await createAgent();
     const res = await postJson(`${API}/agents/${id}/dataguard/apply-batch`, {
       decisions: [
@@ -120,7 +118,7 @@ describe(`POST ${API}/agents/:id/dataguard/apply-batch — Modify verdict cut (#
 });
 
 describe(`POST ${API}/agents/:id/dataguard/apply-batch — remember flag scope (#12)`, () => {
-  test("rejects { verdict: \"deny\", remember: true } — remember only applies to allow", async () => {
+  test('rejects { verdict: "deny", remember: true } — remember only applies to allow', async () => {
     const id = await createAgent();
     const res = await postJson(`${API}/agents/${id}/dataguard/apply-batch`, {
       decisions: [{ issueId: "iss-1", verdict: "deny", remember: true }],
@@ -129,7 +127,7 @@ describe(`POST ${API}/agents/:id/dataguard/apply-batch — remember flag scope (
     expect(res.status).toBeLessThan(500);
   });
 
-  test("accepts { verdict: \"allow\", remember: true } (baseline)", async () => {
+  test('accepts { verdict: "allow", remember: true } (baseline)', async () => {
     const id = await createAgent();
     const res = await postJson(`${API}/agents/${id}/dataguard/apply-batch`, {
       decisions: [{ issueId: "iss-not-loaded", verdict: "allow", remember: true }],
@@ -138,7 +136,7 @@ describe(`POST ${API}/agents/:id/dataguard/apply-batch — remember flag scope (
     expect(res.status).toBe(200);
   });
 
-  test("accepts { verdict: \"deny\", remember: false } — only `remember: true` + deny is the forbidden combo", async () => {
+  test('accepts { verdict: "deny", remember: false } — only `remember: true` + deny is the forbidden combo', async () => {
     const id = await createAgent();
     const res = await postJson(`${API}/agents/${id}/dataguard/apply-batch`, {
       decisions: [{ issueId: "iss-not-loaded", verdict: "deny", remember: false }],
@@ -146,7 +144,7 @@ describe(`POST ${API}/agents/:id/dataguard/apply-batch — remember flag scope (
     expect(res.status).toBe(200);
   });
 
-  test("accepts { verdict: \"deny\" } with `remember` omitted entirely", async () => {
+  test('accepts { verdict: "deny" } with `remember` omitted entirely', async () => {
     const id = await createAgent();
     const res = await postJson(`${API}/agents/${id}/dataguard/apply-batch`, {
       decisions: [{ issueId: "iss-not-loaded", verdict: "deny" }],

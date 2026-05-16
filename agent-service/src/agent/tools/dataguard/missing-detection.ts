@@ -22,34 +22,16 @@
 // Why: when the two disagree, impute silently leaves cells that the profiler
 // flagged as missing — the user sees "NULL"/"N/A" still in the cleaned CSV.
 
-export const DEFAULT_PLACEHOLDERS: ReadonlyArray<string | number> = [
-  999,
-  -1,
-  "unknown",
-  "Unknown",
-];
+export const DEFAULT_PLACEHOLDERS: ReadonlyArray<string | number> = [999, -1, "unknown", "Unknown"];
 
 // Case-insensitive set of tokens that mean "no value was recorded." Compared
 // against the *trimmed*, lowercased cell so whitespace and case can't smuggle
 // a missing cell past the check.
-const MISSING_TOKENS_LOWER: ReadonlySet<string> = new Set([
-  "na",
-  "n/a",
-  "null",
-  "none",
-  "nan",
-]);
+const MISSING_TOKENS_LOWER: ReadonlySet<string> = new Set(["na", "n/a", "null", "none", "nan"]);
 
 // Kept for places that still want the raw token list (e.g., the profiler's
 // ProfileOptions API surface).
-export const DEFAULT_MISSING_TOKENS: ReadonlyArray<string> = [
-  "NA",
-  "N/A",
-  "n/a",
-  "null",
-  "NULL",
-  "None",
-];
+export const DEFAULT_MISSING_TOKENS: ReadonlyArray<string> = ["NA", "N/A", "n/a", "null", "NULL", "None"];
 
 export function isMissing(value: unknown, extraTokens: ReadonlyArray<string> = []): boolean {
   if (value === null || value === undefined) return true;

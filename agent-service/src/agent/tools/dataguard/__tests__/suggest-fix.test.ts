@@ -91,31 +91,29 @@ describe("suggestFix", () => {
   });
 
   test("throws on invalid JSON", async () => {
-    await expect(
-      suggestFix(makeIssue(), { llmCall: constantLlm("not json at all") })
-    ).rejects.toThrow(/invalid JSON/);
+    await expect(suggestFix(makeIssue(), { llmCall: constantLlm("not json at all") })).rejects.toThrow(/invalid JSON/);
   });
 
   test("throws when required field is missing", async () => {
     const bad = { ...JSON.parse(VALID_RAW_JSON) };
     delete bad.operationKind;
-    await expect(
-      suggestFix(makeIssue(), { llmCall: constantLlm(JSON.stringify(bad)) })
-    ).rejects.toThrow(/schema validation/);
+    await expect(suggestFix(makeIssue(), { llmCall: constantLlm(JSON.stringify(bad)) })).rejects.toThrow(
+      /schema validation/
+    );
   });
 
   test("throws when operationKind is not a known enum member", async () => {
     const bad = { ...JSON.parse(VALID_RAW_JSON), operationKind: "delete_database" };
-    await expect(
-      suggestFix(makeIssue(), { llmCall: constantLlm(JSON.stringify(bad)) })
-    ).rejects.toThrow(/schema validation/);
+    await expect(suggestFix(makeIssue(), { llmCall: constantLlm(JSON.stringify(bad)) })).rejects.toThrow(
+      /schema validation/
+    );
   });
 
   test("throws when riskTier is not low|medium|high", async () => {
     const bad = { ...JSON.parse(VALID_RAW_JSON), riskTier: "critical" };
-    await expect(
-      suggestFix(makeIssue(), { llmCall: constantLlm(JSON.stringify(bad)) })
-    ).rejects.toThrow(/schema validation/);
+    await expect(suggestFix(makeIssue(), { llmCall: constantLlm(JSON.stringify(bad)) })).rejects.toThrow(
+      /schema validation/
+    );
   });
 
   test("passes issue details into the prompt for the LLM", async () => {
@@ -126,7 +124,7 @@ describe("suggestFix", () => {
       description: "3 duplicate sample IDs",
     });
     const proposal = await suggestFix(issue, {
-      llmCall: async (prompt) => {
+      llmCall: async prompt => {
         captured = prompt;
         return VALID_RAW_JSON;
       },

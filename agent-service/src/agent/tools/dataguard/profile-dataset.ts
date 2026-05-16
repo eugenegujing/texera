@@ -88,10 +88,7 @@ function isMissing(value: unknown, missingTokens: ReadonlyArray<string>): boolea
   return isCellMissing(value, missingTokens);
 }
 
-function maybeIndices(
-  indices: number[],
-  cap: number
-): number[] | undefined {
+function maybeIndices(indices: number[], cap: number): number[] | undefined {
   return indices.length <= cap ? indices : undefined;
 }
 
@@ -148,10 +145,7 @@ function fingerprintCell(v: unknown): string {
   return JSON.stringify(String(v));
 }
 
-export function rowFingerprint(
-  row: Record<string, unknown>,
-  columns: ReadonlyArray<string>
-): string {
+export function rowFingerprint(row: Record<string, unknown>, columns: ReadonlyArray<string>): string {
   const canonical = [...columns].sort();
   let out = "";
   for (const c of canonical) {
@@ -200,10 +194,7 @@ function inferIdColumn(columns: ReadonlyArray<string>): string | undefined {
   return undefined;
 }
 
-export function profileDataset(
-  dataset: DatasetView,
-  options: ProfileOptions = {}
-): DataQualityIssue[] {
+export function profileDataset(dataset: DatasetView, options: ProfileOptions = {}): DataQualityIssue[] {
   const placeholders = options.placeholderValues ?? DEFAULT_PLACEHOLDERS;
   const missingTokens = options.missingTokens ?? DEFAULT_MISSING_TOKENS;
   const indexCap = options.maxIndicesInIssue ?? DEFAULT_MAX_INDICES_IN_ISSUE;
@@ -269,9 +260,8 @@ export function profileDataset(
   // to infer one from column names (e.g. "sample_id" → use it). Without this
   // inference the auto-trigger's empty-body /scan would never find dup IDs in
   // user datasets — users don't configure scan options through the checklist UI.
-  const idCol = options.idColumn && dataset.columns.includes(options.idColumn)
-    ? options.idColumn
-    : inferIdColumn(dataset.columns);
+  const idCol =
+    options.idColumn && dataset.columns.includes(options.idColumn) ? options.idColumn : inferIdColumn(dataset.columns);
   if (idCol) {
     const positions = new Map<string, number[]>();
     for (let i = 0; i < dataset.rows.length; i++) {
@@ -443,8 +433,14 @@ export function profileDataset(
         if (values.length / Math.max(nonMissingCount, 1) < 0.8) continue;
 
         const sorted = [...values].sort((a, b) => a.v - b.v);
-        const q1 = quantile(sorted.map(p => p.v), 0.25);
-        const q3 = quantile(sorted.map(p => p.v), 0.75);
+        const q1 = quantile(
+          sorted.map(p => p.v),
+          0.25
+        );
+        const q3 = quantile(
+          sorted.map(p => p.v),
+          0.75
+        );
         const iqr = q3 - q1;
         if (iqr === 0) continue;
 

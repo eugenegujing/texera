@@ -71,9 +71,7 @@ describe("serializeDecisionLogCsv", () => {
   test("missing appliedAt renders as an empty trailing field", () => {
     // Post-#11a the schema is 9 cols; appliedAt is the last and can be blank
     // for denied decisions (nothing was applied).
-    const csv = serializeDecisionLogCsv([
-      entry({ userDecision: "deny", appliedAt: undefined }),
-    ]);
+    const csv = serializeDecisionLogCsv([entry({ userDecision: "deny", appliedAt: undefined })]);
     const row = csv.split("\n")[1];
     expect(row.endsWith(",")).toBe(true);
   });

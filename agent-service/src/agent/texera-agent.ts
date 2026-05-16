@@ -51,11 +51,7 @@ import { assembleContext } from "./util/context-utils";
 import { compileWorkflowAsync, type WorkflowCompilationResponse } from "../api/compile-api";
 import { createLogger } from "../logger";
 import type { Logger } from "pino";
-import type {
-  FixProposal,
-  IssueType,
-  PermissionDecision,
-} from "../types/dataguard";
+import type { FixProposal, IssueType, PermissionDecision } from "../types/dataguard";
 import { DataGuardSession } from "./tools/dataguard/dataguard-session";
 import type { ApprovalGateway } from "./tools/dataguard/with-approval";
 import type { LlmCallFn } from "./tools/dataguard/suggest-fix";
@@ -970,10 +966,7 @@ export class TexeraAgent implements ApprovalGateway {
   }
 }
 
-function extractIssueIdFromStep(
-  steps: Map<string, ReActStep>,
-  stepId: string
-): string {
+function extractIssueIdFromStep(steps: Map<string, ReActStep>, stepId: string): string {
   const step = steps.get(stepId);
   return step?.pendingApproval?.proposal.issueId ?? "";
 }

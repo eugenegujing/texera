@@ -146,10 +146,7 @@ describe(`GET ${API}/agents/:id/dataguard/export-jsonl`, () => {
     const agent = _getAgentForTests(id)!;
     agent.getDataGuardSession().setDataset({
       columns: ["text"],
-      rows: [
-        { text: 'line1\nline2 with "quotes"' },
-        { text: "tab\there" },
-      ],
+      rows: [{ text: 'line1\nline2 with "quotes"' }, { text: "tab\there" }],
     });
     const res = await getRaw(`${API}/agents/${id}/dataguard/export-jsonl`);
     const text = await res.text();

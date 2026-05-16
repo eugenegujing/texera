@@ -871,10 +871,7 @@ export function buildApp() {
             verdict: msg.verdict,
             remember: msg.remember,
           });
-          wsLog.info(
-            { agentId, stepId: msg.stepId, verdict: msg.verdict, resolved },
-            "received user decision"
-          );
+          wsLog.info({ agentId, stepId: msg.stepId, verdict: msg.verdict, resolved }, "received user decision");
           return;
         }
 

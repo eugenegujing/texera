@@ -85,7 +85,7 @@ Call this once at the start of a DataGuard run. Returns a JSON array of DataQual
         .optional()
         .describe("Override the default missing-token list (default: ['NA', 'N/A', 'n/a', 'null', 'NULL', 'None'])."),
     }),
-    execute: async (input) => {
+    execute: async input => {
       const dataset = ctx.session.getDataset();
       if (!dataset) {
         return "[ERROR] No dataset loaded into DataGuard session. The frontend must call setDataset before invoking profile_dataset.";
@@ -116,7 +116,7 @@ Call after profile_dataset. Pass the issueId from one of the returned issues. Re
     inputSchema: z.object({
       issueId: z.string().describe("The issueId of a DataQualityIssue returned by profile_dataset."),
     }),
-    execute: async (input) => {
+    execute: async input => {
       const issue = ctx.session.getIssue(input.issueId);
       if (!issue) {
         return `[ERROR] No issue with id "${input.issueId}". Call profile_dataset first.`;
@@ -146,7 +146,7 @@ The result includes the user's verdict.`,
     inputSchema: z.object({
       issueId: z.string().describe("The issueId whose proposal should be applied."),
     }),
-    execute: async (input) => {
+    execute: async input => {
       const proposal = ctx.session.getProposal(input.issueId);
       if (!proposal) {
         return `[ERROR] No proposal for issueId "${input.issueId}". Call suggest_fix first.`;

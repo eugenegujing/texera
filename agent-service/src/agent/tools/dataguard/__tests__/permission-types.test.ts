@@ -28,15 +28,11 @@
 // `PermissionDecision`, `DecisionLogEntry`, and `RecordDecisionInput`.
 
 import { describe, expect, test } from "bun:test";
-import type {
-  DecisionLogEntry,
-  PermissionDecision,
-  Verdict,
-} from "../../../../types/dataguard";
+import type { DecisionLogEntry, PermissionDecision, Verdict } from "../../../../types/dataguard";
 import type { RecordDecisionInput } from "../dataguard-session";
 
 describe("Verdict type — Modify is gone (#11a)", () => {
-  test("a value of \"modify\" is NOT assignable to Verdict", () => {
+  test('a value of "modify" is NOT assignable to Verdict', () => {
     // @ts-expect-error "modify" is removed from the Verdict union by #11a.
     const v: Verdict = "modify";
     // The .toBe argument is also "modify" and that argument is statically
@@ -45,7 +41,7 @@ describe("Verdict type — Modify is gone (#11a)", () => {
     expect(v).toBe("modify");
   });
 
-  test("\"allow\" and \"deny\" remain valid Verdict members", () => {
+  test('"allow" and "deny" remain valid Verdict members', () => {
     const allow: Verdict = "allow";
     const deny: Verdict = "deny";
     expect(allow).toBe("allow");

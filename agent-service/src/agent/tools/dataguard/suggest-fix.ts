@@ -32,14 +32,7 @@ export interface SuggestFixOptions {
 
 const fixProposalSchema = z.object({
   action: z.string().min(1),
-  operationKind: z.enum([
-    "replace_value",
-    "drop_rows",
-    "impute",
-    "standardize",
-    "trim_whitespace",
-    "rename_column",
-  ]),
+  operationKind: z.enum(["replace_value", "drop_rows", "impute", "standardize", "trim_whitespace", "rename_column"]),
   operationParams: z.record(z.string(), z.unknown()),
   riskTier: z.enum(["low", "medium", "high", "warning"]),
   reason: z.string().min(1),
@@ -62,10 +55,7 @@ const DEFAULT_RISK_TIER_BY_ISSUE: Record<string, RiskTier> = {
   inconsistent_label: "medium",
 };
 
-export async function suggestFix(
-  issue: DataQualityIssue,
-  options: SuggestFixOptions
-): Promise<FixProposal> {
+export async function suggestFix(issue: DataQualityIssue, options: SuggestFixOptions): Promise<FixProposal> {
   const prompt = buildPrompt(issue);
   const rawResponse = await options.llmCall(prompt);
   const cleaned = stripCodeFences(rawResponse);
@@ -74,9 +64,7 @@ export async function suggestFix(
   try {
     parsed = JSON.parse(cleaned);
   } catch (e) {
-    throw new Error(
-      `suggest_fix: LLM returned invalid JSON for issue ${issue.issueId}: ${(e as Error).message}`
-    );
+    throw new Error(`suggest_fix: LLM returned invalid JSON for issue ${issue.issueId}: ${(e as Error).message}`);
   }
 
   const validated = fixProposalSchema.safeParse(parsed);

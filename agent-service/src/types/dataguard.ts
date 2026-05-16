@@ -32,12 +32,7 @@ export type Confidence = "low" | "medium" | "high";
 // z-score "outlier" detector that flagged anything beyond ±3σ — too aggressive
 // (it removed legitimately large but consecutive readings), so it was dropped.
 // The remaining detector requires the user to supply a hard min/max per column.
-export type IssueType =
-  | "placeholder_value"
-  | "missing_value"
-  | "duplicate_id"
-  | "outlier"
-  | "inconsistent_label";
+export type IssueType = "placeholder_value" | "missing_value" | "duplicate_id" | "outlier" | "inconsistent_label";
 
 export type FixOperationKind =
   | "replace_value"
@@ -51,11 +46,7 @@ export type FixOperationKind =
 // handler recorded a user-supplied action override in the log but always
 // executed the original proposal.operationParams. Revisit post-hackathon
 // with a real natural-language → operationParams parser.
-export type Verdict =
-  | "allow"
-  | "deny"
-  | "auto_allow_low_risk"
-  | "auto_allow_remembered";
+export type Verdict = "allow" | "deny" | "auto_allow_low_risk" | "auto_allow_remembered";
 
 export interface DataQualityIssue {
   issueId: string;

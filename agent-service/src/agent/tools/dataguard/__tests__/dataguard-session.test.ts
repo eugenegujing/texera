@@ -108,5 +108,4 @@ describe("DataGuardSession", () => {
     expect(s.removeAutoAllowRule(rule.ruleId)).toBe(true);
     expect(s.matchesAutoAllowRule("placeholder_value")).toBe(false);
   });
-
 });

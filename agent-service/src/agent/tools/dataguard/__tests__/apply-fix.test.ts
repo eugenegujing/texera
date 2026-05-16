@@ -277,14 +277,7 @@ describe("applyFix", () => {
     // most frequent string — it's a missing-marker, not data.
     const ds: DatasetView = {
       columns: ["group"],
-      rows: [
-        { group: "A" },
-        { group: "NULL" },
-        { group: "A" },
-        { group: "NULL" },
-        { group: "B" },
-        { group: null },
-      ],
+      rows: [{ group: "A" }, { group: "NULL" }, { group: "A" }, { group: "NULL" }, { group: "B" }, { group: null }],
     };
     const result = applyFix(
       ds,
@@ -325,9 +318,7 @@ describe("applyFix", () => {
   test("impute mode: fills missing with most common string", () => {
     const ds: DatasetView = {
       columns: ["c"],
-      rows: [
-        { c: "A" }, { c: "A" }, { c: "B" }, { c: null }, { c: "" },
-      ],
+      rows: [{ c: "A" }, { c: "A" }, { c: "B" }, { c: null }, { c: "" }],
     };
     const result = applyFix(
       ds,
@@ -458,7 +449,10 @@ describe("applyFix", () => {
   test("rename_column: updates columns array and per-row keys", () => {
     const ds: DatasetView = {
       columns: ["sample_id", "value"],
-      rows: [{ sample_id: "S1", value: 1 }, { sample_id: "S2", value: 2 }],
+      rows: [
+        { sample_id: "S1", value: 1 },
+        { sample_id: "S2", value: 2 },
+      ],
     };
     const result = applyFix(
       ds,

@@ -37,16 +37,21 @@ describe("computeBiasCheck", () => {
     const before: DatasetView = {
       columns: ["group"],
       rows: [
-        { group: "A" }, { group: "A" }, { group: "A" }, { group: "A" }, { group: "A" },
-        { group: "B" }, { group: "B" }, { group: "B" }, { group: "B" }, { group: "B" },
+        { group: "A" },
+        { group: "A" },
+        { group: "A" },
+        { group: "A" },
+        { group: "A" },
+        { group: "B" },
+        { group: "B" },
+        { group: "B" },
+        { group: "B" },
+        { group: "B" },
       ],
     };
     const after: DatasetView = {
       columns: ["group"],
-      rows: [
-        { group: "A" },
-        { group: "B" }, { group: "B" }, { group: "B" }, { group: "B" }, { group: "B" },
-      ],
+      rows: [{ group: "A" }, { group: "B" }, { group: "B" }, { group: "B" }, { group: "B" }, { group: "B" }],
     };
     // A retains 20%, B retains 100% → 80-point gap → skew
     const r = computeBiasCheck(before, after, "group");
