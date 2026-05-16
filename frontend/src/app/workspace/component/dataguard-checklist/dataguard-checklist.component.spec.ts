@@ -237,10 +237,11 @@ describe("DataGuardChecklistComponent.onShowInResultPanel — locate branching",
     // was sent (JSONL path), a not-found toast must fire so the user knows
     // the data has drifted from the scan instead of being silently dropped
     // on a wrong byte-order row.
-    const { component: c2, navigateSpy: spy2, notificationService: notif2 } = makeComponent(
-      "JSONLFileScan",
-      () => Promise.resolve(false)
-    );
+    const {
+      component: c2,
+      navigateSpy: spy2,
+      notificationService: notif2,
+    } = makeComponent("JSONLFileScan", () => Promise.resolve(false));
     (c2 as any).locateCursors.set("issue-1", 1);
     await c2.onShowInResultPanel(entry);
     expect((c2 as any).locateCursors.get("issue-1")).toBe(1);
@@ -255,10 +256,7 @@ describe("DataGuardChecklistComponent.onShowInResultPanel — locate branching",
     // rowKey is sent. A false outcome there means the navigate timed out
     // mid-page-render or was superseded by a newer click, not that the row
     // can't be found. Toasting here would be noisy on every rapid double-click.
-    const { component, notificationService } = makeComponent(
-      "CSVFileScan",
-      () => Promise.resolve(false)
-    );
+    const { component, notificationService } = makeComponent("CSVFileScan", () => Promise.resolve(false));
     const entry = makeEntry([0, 1, 2, 3], ["k0", "k0", "k0", "k0"]);
     await component.onShowInResultPanel(entry);
     expect(notificationService.info).not.toHaveBeenCalled();

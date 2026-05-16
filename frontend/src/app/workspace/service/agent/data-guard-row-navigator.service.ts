@@ -259,13 +259,7 @@ export class DataGuardRowNavigatorService {
    * and the contract is enforced by parallel unit tests using the same
    * fixtures (see the round-6 regression test for JSONL `null` cells).
    */
-  private static readonly MISSING_TOKENS_LOWER: ReadonlySet<string> = new Set([
-    "na",
-    "n/a",
-    "null",
-    "none",
-    "nan",
-  ]);
+  private static readonly MISSING_TOKENS_LOWER: ReadonlySet<string> = new Set(["na", "n/a", "null", "none", "nan"]);
 
   /**
    * Mirror of `isMissing` in agent-service `missing-detection.ts`. Treats

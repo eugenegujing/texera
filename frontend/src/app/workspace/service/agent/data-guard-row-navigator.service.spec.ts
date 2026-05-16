@@ -237,7 +237,7 @@ describe("DataGuardRowNavigatorService", () => {
     // The fix routes any cell that satisfies `isMissingCell` (null / undefined
     // / NaN / "" / whitespace / `na` / `n/a` / `null` / `none` / `nan`,
     // case-insensitive) through the same bare `null` token on both sides.
-    it("regression: explicit-null cell and Jackson-asText `\"null\"` string fingerprint identically (JSONL round 6)", () => {
+    it('regression: explicit-null cell and Jackson-asText `"null"` string fingerprint identically (JSONL round 6)', () => {
       const profilerRow = { score: null, user: "Grace" };
       const texeraRow = { score: "null", user: "Grace" };
       const a = DataGuardRowNavigatorService.rowFingerprint(profilerRow, ["score", "user"]);
