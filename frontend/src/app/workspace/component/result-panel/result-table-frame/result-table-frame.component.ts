@@ -125,6 +125,15 @@ export class ResultTableFrameComponent implements OnInit, OnChanges, OnDestroy {
   // know when the page is shown" rather than "when the HTTP responds" — so
   // we never double-subscribe to the cold `selectPage` Observable.
   private readonly pageRendered$ = new Subject<number>();
+  // DataGuard locate-flow token. Each new navigate request bumps this; every
+  // async branch in handleLocateByKey / handleLocateByIndex captures the value
+  // at request time and bails (emitting `flashed: false` exactly once) if the
+  // captured token no longer matches `currentLocateToken` by the time the
+  // branch resumes. This kills the rapid-click race where an older walk would
+  // otherwise complete after a newer one and flash the wrong row, and also
+  // guarantees the checklist's cursor-advancement Promise resolves for the
+  // superseded request instead of hanging until the 6 s safety timeout.
+  private currentLocateToken: number = 0;
 
   constructor(
     private modalService: NzModalService,
@@ -137,6 +146,12 @@ export class ResultTableFrameComponent implements OnInit, OnChanges, OnDestroy {
     private guiConfigService: GuiConfigService,
     private dataGuardRowNavigator: DataGuardRowNavigatorService
   ) {}
+
+  // DataGuard locate-by-key: max pages to walk before giving up. Without a cap
+  // a malformed key could keep selectPage'ing forever; 10 covers typical
+  // demo / hackathon datasets (e.g. 5 rows/page × 10 pages = 50 rows, larger
+  // than every fixture we ship).
+  private static readonly LOCATE_BY_KEY_MAX_PAGES = 10;
 
   ngOnChanges(changes: SimpleChanges): void {
     this.operatorId = changes.operatorId?.currentValue;
@@ -230,57 +245,210 @@ export class ResultTableFrameComponent implements OnInit, OnChanges, OnDestroy {
       .pipe(untilDestroyed(this))
       .subscribe(req => {
         if (!this.operatorId || req.operatorId !== this.operatorId) {
+          // Wrong operator: this frame is not the target. Don't emit a
+          // flashResult — some other frame (the right one) will handle it.
+          // Note: if there is NO right frame at all (operator was deleted),
+          // the checklist's awaitFlashResult timeout (6 s) catches it.
           return;
         }
-        // Capture operator at click time. The frame's `operatorId` can change
-        // before the async page-load completes (user switches operators); we
-        // bail in applyFlash if the frame is no longer showing this request's
-        // operator. pageSize is intentionally NOT captured — recomputed inside
-        // applyFlash so a panel resize between click and apply takes effect.
-        const requestOperatorId = req.operatorId;
-        const applyFlash = () => {
-          if (this.operatorId !== requestOperatorId) return;
-          const targetPage = DataGuardRowNavigatorService.pageIndexFor(req.rowIndex, this.pageSize);
-          const rowInPage = req.rowIndex - (targetPage - 1) * this.pageSize;
-          this.highlightedRowIndexInPage = rowInPage;
-          this.highlightedColumn = req.column ?? null;
-          this.changeDetectorRef.detectChanges();
-          if (this.highlightTimer !== null) {
-            clearTimeout(this.highlightTimer);
-          }
-          this.highlightTimer = setTimeout(() => {
-            this.highlightedRowIndexInPage = null;
-            this.highlightedColumn = null;
-            this.highlightTimer = null;
-            this.changeDetectorRef.detectChanges();
-          }, ResultTableFrameComponent.HIGHLIGHT_DURATION_MS);
-        };
-        // Compute target page once, off the freshest pageSize. (Reviewer 2:
-        // applyFlash recomputes too, but that branch only runs after the
-        // page-rendered round-trip, so a panel resize in flight still picks
-        // up the new pageSize there.)
-        const targetPage = DataGuardRowNavigatorService.pageIndexFor(req.rowIndex, this.pageSize);
-        if (this.currentPageIndex !== targetPage) {
-          this.currentPageIndex = targetPage;
-          // Wait on the *post-render* signal — not the cold selectPage
-          // Observable — so we don't trigger a duplicate HTTP fetch and so
-          // the flash lands after setupResultTable + detectChanges complete.
-          // race() against a generous timeout so a never-completing render
-          // (e.g., user navigates away) doesn't strand the flash forever.
-          race(
-            this.pageRendered$.pipe(
-              filter(p => p === targetPage),
-              take(1)
-            ),
-            timer(3000)
-          )
-            .pipe(take(1), untilDestroyed(this))
-            .subscribe(() => applyFlash());
-          this.changePaginatedResultData();
+        // Token-cancel any in-flight walk from a prior request. The old walk's
+        // captured token no longer matches currentLocateToken, so its next
+        // async resumption will short-circuit + emit `flashed: false` for its
+        // own requestId. This is what makes rapid clicks safe.
+        this.currentLocateToken = req.requestId;
+        // Branch on rowKey: if the server included a fingerprint, prefer it
+        // (handles Texera's JSONL multi-worker row-shuffle). Fall back to the
+        // raw index path when rowKey is absent or no row matches anywhere.
+        if (req.rowKey !== undefined) {
+          this.handleLocateByKey(req.operatorId, req.requestId, req.rowKey, req.column, req.rowIndex);
         } else {
-          applyFlash();
+          this.handleLocateByIndex(req.operatorId, req.requestId, req.rowIndex, req.column);
         }
       });
+  }
+
+  /**
+   * Centralised flash-result reporter. Wraps the navigator service call so
+   * every exit point in the locate flow goes through one place — easier to
+   * audit "did we report on every branch?".
+   */
+  private reportFlashResult(requestId: number, flashed: boolean): void {
+    this.dataGuardRowNavigator.reportFlashResult({ requestId, flashed });
+  }
+
+  /**
+   * Locate a row by its content fingerprint (`rowKey`). Scans the currently
+   * loaded page first (fast path — common when the issue is on the first
+   * page); on a miss walks subsequent pages up to LOCATE_BY_KEY_MAX_PAGES.
+   * When no match is found anywhere, toasts the user and leaves the operator
+   * highlighted but un-flashed.
+   *
+   * Same operator-id captured-at-click-time guard as the index path — bails
+   * silently if the user switched operators mid-page-load.
+   */
+  private handleLocateByKey(
+    requestOperatorId: string,
+    requestId: number,
+    rowKey: string,
+    column: string | undefined,
+    fallbackIndex: number
+  ): void {
+    // Every async resumption MUST first check that our captured requestId is
+    // still the current one. If a newer click superseded us, emit
+    // `flashed: false` (so the older request's cursor stays put) and bail.
+    // Returns `true` when the caller should bail.
+    const isSuperseded = (): boolean => this.currentLocateToken !== requestId;
+
+    const tryFlashOnCurrentPage = (): boolean => {
+      if (this.operatorId !== requestOperatorId) return true; // bail, but treat as "handled"
+      const columns = this.currentColumns?.map(c => c.columnDef) ?? [];
+      const rowInPage = DataGuardRowNavigatorService.findRowByKey(
+        this.currentResult as ReadonlyArray<Record<string, unknown>>,
+        columns,
+        rowKey
+      );
+      if (rowInPage >= 0) {
+        this.flashRow(rowInPage, column);
+        return true;
+      }
+      return false;
+    };
+
+    // 1. Fast path — match on the page already rendered.
+    if (tryFlashOnCurrentPage()) {
+      this.reportFlashResult(requestId, true);
+      return;
+    }
+
+    // 2. Walk subsequent pages. Start from page 1 (not currentPageIndex+1)
+    //    because the user may not be on page 1 when they click — the affected
+    //    row could be earlier. Stop at LOCATE_BY_KEY_MAX_PAGES or when we run
+    //    out of tuples.
+    const totalPages = Math.max(1, Math.ceil(this.totalNumTuples / Math.max(this.pageSize, 1)));
+    const lastPage = Math.min(totalPages, ResultTableFrameComponent.LOCATE_BY_KEY_MAX_PAGES);
+    const walkPage = (pageIndex: number) => {
+      if (isSuperseded()) {
+        this.reportFlashResult(requestId, false);
+        return;
+      }
+      if (this.operatorId !== requestOperatorId) {
+        // User switched operators mid-walk. Treat as silent skip — the new
+        // operator's frame (if any) handles its own requests, this request
+        // never produced a flash here.
+        this.reportFlashResult(requestId, false);
+        return;
+      }
+      if (pageIndex > lastPage) {
+        // Exhausted the search window. Silently fall back to the file-byte-order
+        // index — this is the same path locate took before fingerprints existed
+        // and is correct for single-worker output (the common case). For
+        // multi-worker shuffle cases the flash may land on the wrong cell, but
+        // toasting on every click is more annoying than the occasional miss is
+        // confusing; the toast was firing 100% of the time during normal use.
+        this.handleLocateByIndex(requestOperatorId, requestId, fallbackIndex, column);
+        return;
+      }
+      this.currentPageIndex = pageIndex;
+      race(
+        this.pageRendered$.pipe(
+          filter(p => p === pageIndex),
+          take(1)
+        ),
+        timer(3000)
+      )
+        .pipe(take(1), untilDestroyed(this))
+        .subscribe(() => {
+          if (isSuperseded()) {
+            this.reportFlashResult(requestId, false);
+            return;
+          }
+          if (tryFlashOnCurrentPage()) {
+            this.reportFlashResult(requestId, true);
+            return;
+          }
+          walkPage(pageIndex + 1);
+        });
+      this.changePaginatedResultData();
+    };
+    walkPage(1);
+  }
+
+  /**
+   * Legacy index-based path. Used as a fallback when `rowKey` is absent
+   * (CSV single-worker, older agent-service builds) or when no key match is
+   * found anywhere in the result panel within LOCATE_BY_KEY_MAX_PAGES.
+   */
+  private handleLocateByIndex(
+    requestOperatorId: string,
+    requestId: number,
+    rowIndex: number,
+    column: string | undefined
+  ): void {
+    const isSuperseded = (): boolean => this.currentLocateToken !== requestId;
+    // applyFlash returns true if it actually flashed, false if the index path
+    // bailed (operator switched, totalNumTuples=0, rowIndex out-of-bounds).
+    // The "no rows" guard catches the empty-click test case: index fallback
+    // can't flash anything when totalNumTuples is 0.
+    const applyFlash = (): boolean => {
+      if (this.operatorId !== requestOperatorId) return false;
+      if (rowIndex < 0 || (this.totalNumTuples > 0 && rowIndex >= this.totalNumTuples)) {
+        return false;
+      }
+      if (this.totalNumTuples === 0 || this.currentResult.length === 0) {
+        return false;
+      }
+      const targetPage = DataGuardRowNavigatorService.pageIndexFor(rowIndex, this.pageSize);
+      const rowInPage = rowIndex - (targetPage - 1) * this.pageSize;
+      // The page may have fewer rows than expected (last page short-fill); if
+      // the computed in-page index is out of range, don't flash a phantom row.
+      if (rowInPage < 0 || rowInPage >= this.currentResult.length) {
+        return false;
+      }
+      this.flashRow(rowInPage, column);
+      return true;
+    };
+    const targetPage = DataGuardRowNavigatorService.pageIndexFor(rowIndex, this.pageSize);
+    if (this.currentPageIndex !== targetPage) {
+      this.currentPageIndex = targetPage;
+      race(
+        this.pageRendered$.pipe(
+          filter(p => p === targetPage),
+          take(1)
+        ),
+        timer(3000)
+      )
+        .pipe(take(1), untilDestroyed(this))
+        .subscribe(() => {
+          if (isSuperseded()) {
+            this.reportFlashResult(requestId, false);
+            return;
+          }
+          this.reportFlashResult(requestId, applyFlash());
+        });
+      this.changePaginatedResultData();
+    } else {
+      if (isSuperseded()) {
+        this.reportFlashResult(requestId, false);
+        return;
+      }
+      this.reportFlashResult(requestId, applyFlash());
+    }
+  }
+
+  /** Shared flash routine: sets highlight state for HIGHLIGHT_DURATION_MS. */
+  private flashRow(rowInPage: number, column: string | undefined): void {
+    this.highlightedRowIndexInPage = rowInPage;
+    this.highlightedColumn = column ?? null;
+    this.changeDetectorRef.detectChanges();
+    if (this.highlightTimer !== null) {
+      clearTimeout(this.highlightTimer);
+    }
+    this.highlightTimer = setTimeout(() => {
+      this.highlightedRowIndexInPage = null;
+      this.highlightedColumn = null;
+      this.highlightTimer = null;
+      this.changeDetectorRef.detectChanges();
+    }, ResultTableFrameComponent.HIGHLIGHT_DURATION_MS);
   }
 
   ngOnDestroy(): void {

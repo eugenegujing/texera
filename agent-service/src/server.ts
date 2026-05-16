@@ -578,6 +578,36 @@ const agentsRouter = new Elysia({ prefix: "/agents", normalize: false })
     return lines.join("\n");
   })
 
+  // Return the in-memory cleaned dataset as JSONL — one JSON object per row,
+  // `columns` dictates the key order, missing/null cells are emitted as
+  // `null` so the round trip is lossless. Used by the frontend write-back
+  // path when the source operator is `JSONLFileScan`.
+  .get("/:id/dataguard/export-jsonl", ({ params: { id }, set }) => {
+    const agent = getAgent(id);
+    const dataset = agent.getDataGuardSession().getDataset();
+    if (!dataset) {
+      set.status = 404;
+      return "No dataset loaded.";
+    }
+    const lines: string[] = [];
+    for (const row of dataset.rows) {
+      // Build an ordered object so JSON.stringify emits keys in `columns`
+      // order. `undefined` cells become `null` for an honest round-trip
+      // (JSON.stringify would otherwise drop them and the column would
+      // silently disappear from that row).
+      const ordered: Record<string, unknown> = {};
+      for (const col of dataset.columns) {
+        const v = row[col];
+        ordered[col] = v === undefined ? null : v;
+      }
+      lines.push(JSON.stringify(ordered));
+    }
+    set.headers["content-type"] = "application/x-ndjson; charset=utf-8";
+    // Trailing newline keeps the output canonical-JSONL (one record per line,
+    // file ends in \n). Empty dataset → empty body, not a stray "\n".
+    return lines.length === 0 ? "" : lines.join("\n") + "\n";
+  })
+
   .get("/:id/dataguard/session", ({ params: { id } }) => {
     const agent = getAgent(id);
     const session = agent.getDataGuardSession();

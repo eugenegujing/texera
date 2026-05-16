@@ -1,4 +1,6 @@
-<div class="dg-permission" *ngIf="step.pendingApproval && !submitted">
+<div
+  class="dg-permission"
+  *ngIf="step.pendingApproval && !submitted">
   <div class="dg-permission__header">
     <strong>DataGuard wants to apply this fix</strong>
     <span class="dg-permission__tier dg-permission__tier--{{step.pendingApproval.riskTier}}">
@@ -25,17 +27,28 @@
   </div>
 
   <div class="dg-permission__actions">
-    <button nz-button nzType="primary" (click)="onAllow(false)">Allow</button>
+    <button
+      nz-button
+      nzType="primary"
+      (click)="onAllow(false)">
+      Allow
+    </button>
     <button
       nz-button
       *ngIf="step.pendingApproval.riskTier !== 'high' && step.pendingApproval.riskTier !== 'warning'"
       (click)="onAllow(true)">
       Allow &amp; don't ask for similar
     </button>
-    <button nz-button (click)="onDeny()">Deny</button>
+    <button
+      nz-button
+      (click)="onDeny()">
+      Deny
+    </button>
   </div>
 </div>
 
-<div *ngIf="submitted" class="dg-permission dg-permission--resolved">
+<div
+  *ngIf="submitted"
+  class="dg-permission dg-permission--resolved">
   Decision sent — waiting for the agent to continue.
 </div>

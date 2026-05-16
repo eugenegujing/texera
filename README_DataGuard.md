@@ -49,7 +49,7 @@ DataGuard sidesteps all of this by living in `agent-service/` rather than in the
 
 ### 3.1 Trigger
 
-The user does **nothing special**. When a dataset-reading operator is added to the workflow canvas — currently `CSVFileScan` or `ParallelCSVFileScan` — the auto-trigger fires:
+The user does **nothing special**. When a dataset-reading operator is added to the workflow canvas — currently `CSVFileScan`, `CSVOldFileScan`, or `JSONLFileScan` — the auto-trigger fires:
 
 1. Resolves the workflow context (id, per-workflow shield setting).
 2. Finds or creates a per-workflow agent on agent-service.
@@ -74,13 +74,28 @@ The dedicated `<texera-dataguard-checklist>` floating panel slides in. The chat 
 
 Each row's `In column X · affects N row(s)` line is a clickable **📍 locate** button. Clicking it:
 
-1. Highlights the source `CSVFileScan` operator on the graph.
+1. Highlights the source operator on the graph.
 2. Opens / focuses the Result Panel for that operator.
 3. Navigates to the page containing the next affected row and flashes the cell.
 
-The button **cycles** — every click advances a per-row cursor through `affectedRowIndices`, wrapping back to the first after the last. Each row owns its own cursor (a `Map<issueId, number>` on the checklist component), so toggling verdicts elsewhere doesn't reset it. The tooltip previews the next position (`Show next affected row (i of N)`).
+The button **cycles** — every click advances a per-row cursor through `affectedRowIndices`, wrapping back to the first after the last. Each row owns its own cursor (`Map<issueId, number>` on the checklist component). Cursors survive benign state re-emits via `purgeStaleCursors` (only ids no longer in the live entry set get evicted, never wholesale clear); they only reset on a genuine fresh scan with a different issueId set. The tooltip previews the next position (`Show next affected row (i of N)`).
 
-Plumbing: `DataGuardRowNavigatorService` is a `ReplaySubject<DataGuardRowNavRequest>(1, 500ms)`. The 500 ms buffer covers the cold-mount case where the user clicks locate while the Result Panel is collapsed and `ResultTableFrameComponent` is async-instantiated. `ResultTableFrameComponent` subscribes, paginates (via an internal `pageRendered$ Subject` so the flash lands AFTER the new page renders — not after a 100 ms guess), and applies `dg-row-highlight` + `dg-cell-highlight` for 2 s (matched to the SCSS pulse animation). Cross-operator races, viewport resize during page swap, columnDef-vs-header naming drift, and stale closures on a destroyed view are all explicitly guarded.
+**Two locate paths split by operator type** because they have different reordering semantics:
+
+| Source operator | Path | Cursor advance | Why |
+|---|---|---|---|
+| `CSVFileScan` / `CSVOldFileScan` | **Sync index** — `handleLocateByIndex(rowIndex)` directly | Synchronously, *before* `navigate` is called | Texera CSV scan is single-worker → display order = file-byte source order. The index DataGuard computed against `parseCsv`'s output is correct as-is. No fingerprint dance needed; simpler code, lower latency. |
+| `JSONLFileScan` | **Fingerprint match + flash-confirmed Promise** — `handleLocateByKey(rowKey, …)` | Only on `flashed === true` (await the Promise) | Texera JSONL scan is parallelizable → display order can shuffle relative to source order. The index is no longer trustworthy. We compute a content-stable fingerprint per row in the profiler and match it against rendered display rows. |
+
+The JSONL path additionally has:
+
+- **Fingerprint contract.** `rowFingerprint(row, columns)` is byte-identical on agent-service and frontend: sort columns alphabetically, for each cell `String(v) ` then `JSON.stringify(...)` (the `String()` step is critical — Texera's runtime sometimes coerces numbers to strings during schema-widened display, so naked `JSON.stringify(45)` vs `JSON.stringify("45")` would mismatch). Both sides have contract-example tests.
+- **`currentLocateToken` cancellation.** Each click bumps a monotonic counter; every async resumption in `handleLocateByKey` (page-render race, walkPage recursion) checks the captured token before mutating state. Older walks bail and emit `flashResult: false` exactly once so the awaiting Promise resolves rather than hanging.
+- **Subscribe-before-publish navigate Promise.** `navigate()` returns `Promise<boolean>`. Internally: `firstValueFrom(race(filtered, timer(36s)))` subscribes synchronously to `flashResult$`, then `nav$.next(req)` publishes. So even a synchronous fast-path emit (target row already on current page) is caught.
+- **Walk up to `LOCATE_BY_KEY_MAX_PAGES = 10` pages** before falling back to the index path. The fingerprint match falls back silently to index if it can't find the row — no nagging toast.
+- **36 s safety timeout** derived from `LOCATE_BY_KEY_MAX_PAGES × 3500 ms + 1000 ms` so a legitimately slow walk doesn't time out and skip the cursor.
+
+The result-panel side uses an internal `pageRendered$ Subject` so the flash lands AFTER the new page renders (not after a 100 ms guess). `dg-row-highlight` + `dg-cell-highlight` apply for 2 s, matched to the SCSS pulse animation. Cross-operator races, viewport resize during page swap, columnDef-vs-header naming drift, and stale closures on a destroyed view are all guarded.
 
 ### 3.4 Toolbar shield + floating icon
 
@@ -285,11 +300,34 @@ The checklist component lives at `bottom: 100px; right: 80px` by default. When d
 ```ts
 private static readonly DATASET_OPERATOR_TYPES = new Set<string>([
   "CSVFileScan",
-  "ParallelCSVFileScan",
+  "CSVOldFileScan",
+  "JSONLFileScan",
 ]);
 ```
 
-CSV-only for now — `loadFromOperatorFile` pipes every blob through `Papa.parse`, so adding `JSONFileScan` / `TableFileScan` / Parquet would either crash or produce garbage rows. Per-format parsing is the obvious follow-up.
+`loadFromOperatorFile` dispatches by operator type to a parser registry:
+
+```ts
+type DatasetParser = (blob, fileName, options?: {delimiter?}) => Promise<{columns, rows}>;
+const PARSERS: Record<string, DatasetParser> = {
+  CSVFileScan:     parseCsv,
+  CSVOldFileScan:  parseCsv,    // honors options.delimiter (CSVOld customDelimiter)
+  JSONLFileScan:   parseJsonl,  // nested flatten + array stringify + collision rule
+};
+```
+
+**CSV variants** share `parseCsv`. CSVOld's Scala impl uses scala-csv's `DefaultCSVFormat` (RFC-4180-equivalent bytes) but exposes a `customDelimiter` operator property; `extractParserOptions` reads it from `op.operatorProperties.customDelimiter` and threads it into Papa as the `delimiter` option, so `;`, `\t`, or any non-comma separator is honored.
+
+**JSONL** goes to `parseJsonl` (in `data-guard-jsonl.ts`). Flatten policy:
+- Nested objects → dot-notation columns (`address.street`). Pre-scan collects all nested-owned paths; second pass emits leaves and skips (with single warning per path) literal-dotted top-level keys whose path is nested-owned. **Nested always wins regardless of JSON source order.**
+- Arrays → `JSON.stringify(arr)` as a single cell (never explodes rows; preserves row indices for `apply_fix` rowIndices contract).
+- Non-object lines (bare strings/numbers/booleans/arrays/null) → `console.warn` and skip.
+- Blank lines + CRLF tolerated.
+- Server-side `GET /dataguard/export-jsonl` round-trips JSONL after Apply (iterates `dataset.columns` for canonical key order; `undefined` → `null` for lossless round-trip).
+
+**Out of trigger set** (intentional): `ArrowFileScan`, `FileLister`, `FileScan`, `FileScanFromInput`, `TextInput`. Adding a format = register a parser in `PARSERS`, add the operator type to `DATASET_OPERATOR_TYPES`, ensure write-back format-awareness if the operator has its own file format (JSONL has `/export-jsonl`, CSV uses default `/export-csv`).
+
+`ParallelCSVFileScan` is intentionally omitted: Texera disables it in the operator registry (`LogicalOp.scala:171` commented out, "so that it does not confuse user"). If re-enabled, one-line add to `PARSERS` and `DATASET_OPERATOR_TYPES`.
 
 ---
 
@@ -411,24 +449,32 @@ src/app/workspace/
 ```bash
 cd agent-service
 bun run typecheck   # exit 0
-bun test            # 199 pass / 0 fail (419 expect calls)
+bun test            # 217 pass / 0 fail (457 expect calls)
 
 cd frontend
 npx tsc --noEmit    # exit 0
+ng test --watch=false   # runs Karma harness (the same one CONTRIBUTING.md requires)
 ```
 
 Test coverage spans:
 
-- Types fixtures (12) — verifies the literal unions accept and reject the right members.
-- Profile (20+) — per-detector cases including the validRanges-based outlier, the explicit "clustered large readings are NOT auto-outliers" assertion, and the `inferIdColumn` heuristic across all id-name patterns (`id`, `*_id`, `*Id`, `id_*`).
-- Suggest (10+) — LLM-response schema validation.
-- Apply (16) — every op kind round-trips; original dataset never mutated; `replace_value` with `rowIndices` regression-locks the LakeFS "no changes detected" bug; `missingTokens` override threads through to impute.
-- With-approval (7) — low/medium/high/warning gating, the `warning`-with-remembered-rule case, and the buffered-decision race.
-- Session (8) — recordIssue/recordDecision/auto-allow lifecycle.
-- Decision log (6) + decision-log-no-modify (2) — RFC-4180 CSV shape and the post-#11a 9-column schema lock.
-- Apply-batch end-to-end (12+) — Modify-verdict rejection, `additionalProperties` rejection, `verdict==="deny" && remember===true` rejection, residual re-scan correctness.
-- Permission-types (4) — `@ts-expect-error` locks that `"modify"` and `modifiedAction` cannot type-check anywhere.
-- Frontend specs — `DataGuardRowNavigatorService` (cycle math, ReplaySubject TTL, negative-cursor coercion); `DataGuardAutoTriggerService` (resolveRescanTarget decision tree + pipeline serialization proof).
+- **Types fixtures** (12) — verifies the literal unions accept and reject the right members.
+- **Profile** (28+) — per-detector cases including the validRanges-based outlier, the explicit "clustered large readings are NOT auto-outliers" assertion, the `inferIdColumn` heuristic across all id-name patterns (`id`, `*_id`, `*Id`, `id_*`, **dotted JSONL flatten names like `user.id` / `customer.uid`**), `rowFingerprint` contract example + number-vs-string equivalence + float round-trip.
+- **Suggest** (10+) — LLM-response schema validation; outlier/out-of-range proposals must use `rowIndices` not `match`.
+- **Apply** (16) — every op kind round-trips; original dataset never mutated; `replace_value` with `rowIndices` regression-locks the LakeFS "no changes detected" bug; `missingTokens` override threads through to impute.
+- **With-approval** (7) — low/medium/high/warning gating, `warning`-with-remembered-rule, buffered-decision race.
+- **Session** (8) — recordIssue/recordDecision/auto-allow lifecycle.
+- **Decision log** (6) + **decision-log-no-modify** (2) — RFC-4180 CSV shape and the post-#11a 9-column schema lock.
+- **Apply-batch end-to-end** (12+) — Modify-verdict rejection, `additionalProperties` rejection, `verdict==="deny" && remember===true` rejection, residual re-scan correctness.
+- **Permission-types** (4) — `@ts-expect-error` locks that `"modify"` and `modifiedAction` cannot type-check anywhere.
+- **Export-jsonl** (6) — empty session, multi-row, special chars, null round-trip.
+- **Frontend specs:**
+  - `DataGuardRowNavigatorService` (36): cycle math, fingerprint algorithm parity, `findRowByKey`, `nextCycleStep` cycle, `purgeStaleCursors` survival semantics, **`navigate()` Promise round-3+4 contract** (rapid-click race resolves only the survivor, empty-click timeout leaves cursor put, synchronous fast-path emit-before-await race fixed).
+  - `DataGuardAutoTriggerService` (7): `resolveRescanTarget` decision tree + pipeline serialization proof.
+  - `DataGuardChecklistComponent` (2): **CSV-path advances cursor synchronously**, JSONL-path waits for flash-confirmed Promise (only advances on `true`).
+  - `data-guard-jsonl` (15): parser edge cases — nested flatten, array stringify, blank lines, CRLF, malformed JSON skip, collision rule (nested wins regardless of source order), 100-line bulk.
+
+The locate feature alone went through four iterative rounds — cursor preservation (purgeStaleCursors), fingerprint type-coercion (`String()` before stringify), token cancellation (`currentLocateToken`), subscribe-before-publish Promise (`firstValueFrom(race(...))` subscribes before `.next()`) — each round caught by a tightly-scoped reviewer pass. See git log on `feat/dataguard-mvp` for the full arc.
 
 ---
 
@@ -492,7 +538,7 @@ Relevant concepts:
 
 ## 19. Post-MVP follow-ups
 
-- **JSON / Parquet operator support.** Auto-trigger is intentionally narrowed to `CSVFileScan` + `ParallelCSVFileScan`. Adding `JSONFileScan` / `TableFileScan` / Parquet needs `loadFromOperatorFile` to branch by suffix instead of force-`Papa.parse`-ing every blob.
+- **Arrow / `File Scan` / `Text Input` operator support.** Auto-trigger is currently `CSVFileScan` + `CSVOldFileScan` + `JSONLFileScan`. Adding Arrow needs a binary IPC parser (`apache-arrow` package). `File Scan` / `File Scan From Input` need a suffix-based dispatcher to pick the right parser. `Text Input` has no file — would need a property-driven adapter and probably can't do the cleaned-version write-back, so DataGuard would be read-only there.
 - **Modify verdict.** Currently cut. Returns only with a real natural-language → `operationParams` parser; the legacy "modify" recorded a free-text override but executed the original params, which silently lied.
 - **Iceberg-backed decision log.** Via the existing Lakekeeper integration. Currently CSV.
 - **`run_cleaning_workflow` tool.** Distributed cleaning by delegating to a Texera workflow for datasets that don't fit in memory.

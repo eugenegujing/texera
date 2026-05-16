@@ -85,14 +85,220 @@ describe("DataGuardRowNavigatorService", () => {
     });
   });
 
+  describe("purgeStaleCursors", () => {
+    // Regression: the checklist's locate cursors used to be cleared wholesale
+    // whenever the results-service emitted, which wiped the per-row cursor
+    // mid-cycle after benign re-emits (verdict toggles, status messages).
+    // The fix swaps clear() for a per-key purge so live ids survive.
+    it("keeps cursors for ids that are still live across a re-emit", () => {
+      const cursors = new Map<string, number>([
+        ["issue-a", 2],
+        ["issue-b", 1],
+      ]);
+      // Same id set re-emits → no mutations expected.
+      DataGuardRowNavigatorService.purgeStaleCursors(cursors, new Set(["issue-a", "issue-b"]));
+      expect(cursors.get("issue-a")).toBe(2);
+      expect(cursors.get("issue-b")).toBe(1);
+      expect(cursors.size).toBe(2);
+    });
+
+    it("regression: a 4-step cycle survives an unrelated updateEntry re-emit", () => {
+      // Simulates: user clicks 📍 twice on issue-a (cursor reaches 2), then
+      // toggles issue-b's verdict (which fires updateEntry → setState with the
+      // same id set), then clicks 📍 on issue-a a third time. The third click
+      // MUST advance from 2 → 3, not snap back to 0 → 1.
+      const cursors = new Map<string, number>([["issue-a", 2]]);
+      // Re-emit after the benign verdict toggle. Both ids still live.
+      DataGuardRowNavigatorService.purgeStaleCursors(cursors, new Set(["issue-a", "issue-b"]));
+      expect(cursors.get("issue-a")).toBe(2);
+      // Next click reads this and feeds it into nextCycleStep.
+      const indices = [3, 7, 12, 15];
+      const step = DataGuardRowNavigatorService.nextCycleStep(indices, cursors.get("issue-a")!);
+      expect(step.value).toBe(12);
+      expect(step.nextCursor).toBe(3);
+    });
+
+    it("drops cursors for ids that disappeared (fresh scan)", () => {
+      const cursors = new Map<string, number>([
+        ["issue-a", 2],
+        ["issue-b", 1],
+      ]);
+      // Fresh scan: completely different id set.
+      DataGuardRowNavigatorService.purgeStaleCursors(cursors, new Set(["issue-c", "issue-d"]));
+      expect(cursors.has("issue-a")).toBe(false);
+      expect(cursors.has("issue-b")).toBe(false);
+      expect(cursors.size).toBe(0);
+    });
+
+    it("preserves the intersection when the id set partially changes", () => {
+      const cursors = new Map<string, number>([
+        ["issue-a", 2],
+        ["issue-b", 1],
+        ["issue-c", 3],
+      ]);
+      DataGuardRowNavigatorService.purgeStaleCursors(cursors, new Set(["issue-b", "issue-d"]));
+      expect(cursors.has("issue-a")).toBe(false);
+      expect(cursors.get("issue-b")).toBe(1);
+      expect(cursors.has("issue-c")).toBe(false);
+      // Live ids without prior cursors are not auto-added — that's the
+      // checklist's `.get(...) ?? 0` job at click time.
+      expect(cursors.has("issue-d")).toBe(false);
+    });
+
+    it("handles an empty live set by purging everything", () => {
+      const cursors = new Map<string, number>([["issue-a", 2]]);
+      DataGuardRowNavigatorService.purgeStaleCursors(cursors, new Set());
+      expect(cursors.size).toBe(0);
+    });
+
+    it("is a no-op on an empty cursors map", () => {
+      const cursors = new Map<string, number>();
+      DataGuardRowNavigatorService.purgeStaleCursors(cursors, new Set(["x"]));
+      expect(cursors.size).toBe(0);
+    });
+  });
+
+  describe("rowFingerprint", () => {
+    // Mirror of the agent-service profile-dataset.test.ts contract. These two
+    // suites are the cross-language locks that catch JSON.stringify drift
+    // between Bun (server) and V8 (browser).
+    it("produces identical keys for identical content", () => {
+      const a = DataGuardRowNavigatorService.rowFingerprint({ age: 25, name: "Alice" }, ["age", "name"]);
+      const b = DataGuardRowNavigatorService.rowFingerprint({ age: 25, name: "Alice" }, ["age", "name"]);
+      expect(a).toBe(b);
+    });
+
+    it("canonicalises column order (sort) so display-side reordering doesn't matter", () => {
+      const a = DataGuardRowNavigatorService.rowFingerprint({ age: 25, name: "Alice" }, ["age", "name"]);
+      const b = DataGuardRowNavigatorService.rowFingerprint({ age: 25, name: "Alice" }, ["name", "age"]);
+      expect(a).toBe(b);
+    });
+
+    it("treats missing key and explicit null the same way", () => {
+      const a = DataGuardRowNavigatorService.rowFingerprint({ age: null, name: "Alice" }, ["age", "name"]);
+      const b = DataGuardRowNavigatorService.rowFingerprint({ name: "Alice" }, ["age", "name"]);
+      expect(a).toBe(b);
+    });
+
+    // Contract example: the exact same input/output as the agent-service
+    // counterpart test ("contract example: known input produces known output").
+    // If either side drifts, both tests fail and the diff makes the cause obvious.
+    // Format: JSON.stringify(String(value)) per non-null cell; null/undefined
+    // → bare `null` literal (no quotes).
+    it("contract example: matches agent-service rowFingerprint byte-for-byte", () => {
+      const row = { glucose: 180, patient_id: "p-7", group: null };
+      const key = DataGuardRowNavigatorService.rowFingerprint(row, ["patient_id", "group", "glucose"]);
+      // glucose: JSON.stringify(String(180)) = "\"180\""
+      // group:   null                         = "null"
+      // patient_id: JSON.stringify(String("p-7")) = "\"p-7\""
+      expect(key).toBe('"180"' + "null" + '"p-7"');
+    });
+
+    // Bug repro: Texera's JSONLScanSourceOpExec widens mixed-type columns to
+    // String via parseField(stringValue, schemaType), while DataGuard's own
+    // parseJsonl keeps native JSON types. Without the String() coercion, the
+    // profiler-side number `45` and display-side string `"45"` fingerprint
+    // differently and findRowByKey misses every row → wrong cell highlight.
+    it("regression: number and numeric-string cells fingerprint identically (JSONL mixed-type)", () => {
+      const fromAgent = DataGuardRowNavigatorService.rowFingerprint({ age: 45, sample_id: "J001" }, [
+        "age",
+        "sample_id",
+      ]);
+      const fromTexera = DataGuardRowNavigatorService.rowFingerprint({ age: "45", sample_id: "J001" }, [
+        "age",
+        "sample_id",
+      ]);
+      expect(fromAgent).toBe(fromTexera);
+      // And the resulting token is the quoted-string form.
+      expect(fromAgent).toBe('"45"' + '"J001"');
+    });
+
+    it("regression: float values round-trip via String() identically on V8/Bun", () => {
+      const a = DataGuardRowNavigatorService.rowFingerprint({ x: 28.1 }, ["x"]);
+      const b = DataGuardRowNavigatorService.rowFingerprint({ x: "28.1" }, ["x"]);
+      expect(a).toBe(b);
+      expect(a).toBe('"28.1"');
+    });
+  });
+
+  describe("findRowByKey", () => {
+    const rows = [
+      { id: "a", v: 1 },
+      { id: "b", v: 2 },
+      { id: "c", v: 3 },
+    ];
+    const columns = ["id", "v"];
+
+    it("finds a row in the middle of the array", () => {
+      const key = DataGuardRowNavigatorService.rowFingerprint({ id: "b", v: 2 }, columns);
+      expect(DataGuardRowNavigatorService.findRowByKey(rows, columns, key)).toBe(1);
+    });
+
+    it("returns -1 when no row matches", () => {
+      const key = DataGuardRowNavigatorService.rowFingerprint({ id: "z", v: 99 }, columns);
+      expect(DataGuardRowNavigatorService.findRowByKey(rows, columns, key)).toBe(-1);
+    });
+
+    it("returns -1 for empty inputs", () => {
+      expect(DataGuardRowNavigatorService.findRowByKey([], columns, "anything")).toBe(-1);
+      expect(DataGuardRowNavigatorService.findRowByKey(rows, [], "anything")).toBe(-1);
+    });
+
+    it("survives display-side column reordering (caller's column list can be in any order)", () => {
+      // Caller passes columns in a different order than the producer side did
+      // — the fingerprint sort canonicalises, so we still match.
+      const key = DataGuardRowNavigatorService.rowFingerprint({ id: "c", v: 3 }, ["v", "id"]);
+      expect(DataGuardRowNavigatorService.findRowByKey(rows, ["id", "v"], key)).toBe(2);
+    });
+  });
+
   describe("navigate / getNav$", () => {
-    it("multicasts the request to subscribers", () => {
+    it("multicasts the request to nav$ subscribers, stamping a requestId, and resolves Promise<boolean>", async () => {
       const svc = new DataGuardRowNavigatorService();
-      const req: DataGuardRowNavRequest = { operatorId: "op-1", rowIndex: 42, column: "age" };
       const received: DataGuardRowNavRequest[] = [];
-      svc.getNav$().subscribe(r => received.push(r));
-      svc.navigate(req);
-      expect(received).toEqual([req]);
+      svc.getNav$().subscribe(r => {
+        received.push(r);
+        // Auto-respond so navigate() resolves.
+        svc.reportFlashResult({ requestId: r.requestId, flashed: true });
+      });
+      const flashed = await svc.navigate({ operatorId: "op-1", rowIndex: 42, column: "age" });
+      expect(flashed).toBe(true);
+      expect(received.length).toBe(1);
+      expect(received[0].operatorId).toBe("op-1");
+      expect(received[0].rowIndex).toBe(42);
+      expect(received[0].column).toBe("age");
+      expect(typeof received[0].requestId).toBe("number");
+    });
+
+    it("carries rowKey alongside rowIndex so subscribers can prefer the key", async () => {
+      const svc = new DataGuardRowNavigatorService();
+      const received: DataGuardRowNavRequest[] = [];
+      svc.getNav$().subscribe(r => {
+        received.push(r);
+        svc.reportFlashResult({ requestId: r.requestId, flashed: true });
+      });
+      await svc.navigate({
+        operatorId: "op-1",
+        rowIndex: 4,
+        rowKey: '"alice"25',
+        column: "age",
+      });
+      expect(received[0].rowKey).toBe('"alice"25');
+      expect(received[0].rowIndex).toBe(4);
+    });
+
+    it("assigns monotonically increasing requestIds across calls", async () => {
+      const svc = new DataGuardRowNavigatorService();
+      const seen: number[] = [];
+      svc.getNav$().subscribe(r => {
+        seen.push(r.requestId);
+        svc.reportFlashResult({ requestId: r.requestId, flashed: true });
+      });
+      await svc.navigate({ operatorId: "op-1", rowIndex: 0 });
+      await svc.navigate({ operatorId: "op-1", rowIndex: 1 });
+      await svc.navigate({ operatorId: "op-1", rowIndex: 2 });
+      expect(seen[1]).toBeGreaterThan(seen[0]);
+      expect(seen[2]).toBeGreaterThan(seen[1]);
     });
 
     // R3: cold-mount replay. The ResultTableFrameComponent mounts lazily after
@@ -101,22 +307,149 @@ describe("DataGuardRowNavigatorService", () => {
     // request — this is the buffer behaviour reviewers asked us to lock down.
     it("replays the most recent request to a late subscriber (cold-mount)", () => {
       const svc = new DataGuardRowNavigatorService();
-      const req: DataGuardRowNavRequest = { operatorId: "op-1", rowIndex: 7, column: "x" };
-      svc.navigate(req);
+      // Fire-and-forget — we're testing the nav$ replay, not the awaiter.
+      void svc.navigate({ operatorId: "op-1", rowIndex: 7, column: "x" });
       const received: DataGuardRowNavRequest[] = [];
       svc.getNav$().subscribe(r => received.push(r));
-      expect(received).toEqual([req]);
+      expect(received.length).toBe(1);
+      expect(received[0].rowIndex).toBe(7);
     });
 
     // R3 followup: the replay window is bounded (500 ms) so a request from a
     // long-ago click doesn't leak into a much later mount.
     it("does not replay requests older than the buffer window", fakeAsync(() => {
       const svc = new DataGuardRowNavigatorService();
-      svc.navigate({ operatorId: "op-1", rowIndex: 7 });
+      void svc.navigate({ operatorId: "op-1", rowIndex: 7 });
       tick(1000);
       const received: DataGuardRowNavRequest[] = [];
       svc.getNav$().subscribe(r => received.push(r));
       expect(received).toEqual([]);
     }));
+  });
+
+  describe("navigate() flash-confirmed Promise (rounds 3 + 4)", () => {
+    // Round-3 mechanism: result-table-frame emits {requestId, flashed} on
+    // flashResult$ and the checklist only advances its locate cursor on
+    // `true`. Cures: silent skips (4 clicks → flashes at [0,1,(skip),3]
+    // + 5th click wraps to 0) and rapid-click cursor drift.
+    //
+    // Round-4 fix: navigate() returns Promise<boolean> directly and subscribes
+    // to flashResult$ BEFORE publishing on nav$. Without that ordering, a
+    // SYNCHRONOUS fast-path emission (target row already on current page →
+    // table-frame calls reportFlashResult inside the next() chain) would be
+    // dropped by the Subject and the awaiter would hang the full safety
+    // timeout — leaving the cursor stuck on indices[0] for every cycle.
+
+    // CRITICAL round-4 regression lock — production order.
+    //
+    // The fake frame subscribes to nav$ FIRST (mimicking the real
+    // ResultTableFrame's ngOnInit subscription) and on every emission calls
+    // reportFlashResult SYNCHRONOUSLY inside the next() chain — exactly what
+    // tryFlashOnCurrentPage produces on the fast path. Then the caller does
+    // `await navigate()`. Without subscribe-before-next inside navigate(),
+    // this Promise would hang until the 36 s safety timeout and resolve
+    // false. This test would have caught the round-3 bug.
+    it("regression: navigate resolves true when the frame reports synchronously inside the next() chain (fast path)", async () => {
+      const svc = new DataGuardRowNavigatorService();
+      svc.getNav$().subscribe(req => {
+        // Synchronous emission — exactly what the fast path produces.
+        svc.reportFlashResult({ requestId: req.requestId, flashed: true });
+      });
+      const flashed = await svc.navigate({ operatorId: "op-1", rowIndex: 1 });
+      expect(flashed).toBe(true);
+    });
+
+    it("regression: a cycle of synchronous fast-path clicks advances each time", async () => {
+      // Direct simulation of the user's scenario: 4 clicks on an issue with
+      // 4 affected rows, each landing on the already-rendered page (fast
+      // path = synchronous reportFlashResult). All 4 must resolve `true`
+      // so the cursor advances through [0,1,2,3] without skipping.
+      const svc = new DataGuardRowNavigatorService();
+      svc.getNav$().subscribe(req => {
+        svc.reportFlashResult({ requestId: req.requestId, flashed: true });
+      });
+      const results: boolean[] = [];
+      for (let i = 0; i < 4; i++) {
+        results.push(await svc.navigate({ operatorId: "op-1", rowIndex: i }));
+      }
+      expect(results).toEqual([true, true, true, true]);
+    });
+
+    it("navigate resolves false when the table-frame reports flashed=false", async () => {
+      const svc = new DataGuardRowNavigatorService();
+      svc.getNav$().subscribe(req => {
+        svc.reportFlashResult({ requestId: req.requestId, flashed: false });
+      });
+      const flashed = await svc.navigate({ operatorId: "op-1", rowIndex: 1 });
+      expect(flashed).toBe(false);
+    });
+
+    it("navigate ignores results stamped with an unrelated requestId", async () => {
+      const svc = new DataGuardRowNavigatorService();
+      svc.getNav$().subscribe(req => {
+        // Wrong-id result first (would hang the awaiter if we didn't filter)
+        // then the real one.
+        svc.reportFlashResult({ requestId: req.requestId + 999, flashed: true });
+        svc.reportFlashResult({ requestId: req.requestId, flashed: false });
+      });
+      const flashed = await svc.navigate({ operatorId: "op-1", rowIndex: 1 });
+      expect(flashed).toBe(false);
+    });
+
+    // Required test 1: rapid two-click race. Click A's walk gets superseded;
+    // cursor advances EXACTLY once (for B's success), not twice. The fake
+    // frame emits A's flashed=false and B's flashed=true.
+    it("rapid two-click race: superseded older walk does not advance the cursor", async () => {
+      const svc = new DataGuardRowNavigatorService();
+      let advances = 0;
+      const seenRequests: number[] = [];
+      // Don't auto-respond — we'll emit manually to control ordering.
+      svc.getNav$().subscribe(req => seenRequests.push(req.requestId));
+      const pA = svc.navigate({ operatorId: "op-1", rowIndex: 0 }).then(f => {
+        if (f) advances++;
+      });
+      const pB = svc.navigate({ operatorId: "op-1", rowIndex: 1 }).then(f => {
+        if (f) advances++;
+      });
+      // Report: A superseded (false), B succeeded (true).
+      svc.reportFlashResult({ requestId: seenRequests[0], flashed: false });
+      svc.reportFlashResult({ requestId: seenRequests[1], flashed: true });
+      await Promise.all([pA, pB]);
+      expect(advances).toBe(1);
+    });
+
+    // Required test 2: empty-click — the table-frame never reports anything.
+    // navigate() must resolve `false` via the safety timeout so the cursor
+    // stays put. Timeout is 10 * 3500 + 1000 = 36000 ms (round-4 concern #2).
+    it("empty-click safety timeout resolves false so the cursor stays put", async () => {
+      vi.useFakeTimers();
+      try {
+        const svc = new DataGuardRowNavigatorService();
+        // No nav$ subscriber → no reportFlashResult ever fires. Wedged-frame
+        // simulation.
+        let resolved: boolean | undefined;
+        const promise = svc.navigate({ operatorId: "op-1", rowIndex: 7 }).then(r => {
+          resolved = r;
+        });
+        // Advance past the safety timeout (36000 ms).
+        await vi.advanceTimersByTimeAsync(36500);
+        await promise;
+        expect(resolved).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("getFlashResult$ multicasts {requestId, flashed} to subscribers", () => {
+      const svc = new DataGuardRowNavigatorService();
+      const seen: { requestId: number; flashed: boolean }[] = [];
+      svc.getFlashResult$().subscribe(r => seen.push(r));
+      svc.reportFlashResult({ requestId: 1, flashed: true });
+      svc.reportFlashResult({ requestId: 2, flashed: false });
+      expect(seen).toEqual([
+        { requestId: 1, flashed: true },
+        { requestId: 2, flashed: false },
+      ]);
+    });
   });
 });

@@ -66,10 +66,7 @@ export class DataGuardSettingsService {
 
   /** Persist + broadcast a new enabled state for this workflow. */
   public setEnabled(workflowId: number, enabled: boolean): void {
-    localStorage.setItem(
-      this.key(workflowId),
-      enabled ? DataGuardSettingsService.ON : DataGuardSettingsService.OFF
-    );
+    localStorage.setItem(this.key(workflowId), enabled ? DataGuardSettingsService.ON : DataGuardSettingsService.OFF);
     const next = new Map(this.cache$.value);
     next.set(workflowId, enabled);
     this.cache$.next(next);

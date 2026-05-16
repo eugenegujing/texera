@@ -18,7 +18,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { profileDataset } from "../profile-dataset";
+import { profileDataset, rowFingerprint } from "../profile-dataset";
 import type { DatasetView } from "../dataset";
 
 describe("profileDataset", () => {
@@ -146,6 +146,33 @@ describe("profileDataset", () => {
       { col: "userId" },
       { col: "id_card" },
       { col: "ID" },
+    ];
+    for (const { col } of cases) {
+      const ds: DatasetView = {
+        columns: [col, "value"],
+        rows: [
+          { [col]: "a", value: 1 },
+          { [col]: "a", value: 2 },
+          { [col]: "b", value: 3 },
+        ],
+      };
+      const issues = profileDataset(ds);
+      const dup = issues.find(i => i.issueType === "duplicate_id");
+      expect(dup).toBeDefined();
+      expect(dup!.column).toBe(col);
+    }
+  });
+
+  test("auto-infer recognizes dotted JSONL-flatten names (`user.id`, `customer.uid`, nested)", () => {
+    // JSONL flatten produces dot-notation column names. The underscore-based
+    // matchers used to miss these (`.` is not `_`, and `Id$` is case-sensitive),
+    // so dup-ID detection silently no-op'd on JSONL-loaded data. Regression
+    // lock for F1 from the round-2 review.
+    const cases: Array<{ col: string }> = [
+      { col: "user.id" },
+      { col: "customer.uid" },
+      { col: "nested.user.id" },
+      { col: "Account.ID" }, // case-insensitive
     ];
     for (const { col } of cases) {
       const ds: DatasetView = {
@@ -360,6 +387,132 @@ describe("profileDataset", () => {
       };
       const issues = profileDataset(ds);
       expect(issues.find(i => i.issueType === "inconsistent_label")).toBeUndefined();
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // rowFingerprint — the contract that lets the frontend `findRowByKey` match
+  // a profiler-emitted key against rows whose display-order has been shuffled
+  // by Texera's multi-worker JSONL scan. Lock the algorithm down here.
+  // ---------------------------------------------------------------------------
+  describe("rowFingerprint", () => {
+    test("identical content → identical key", () => {
+      const a = rowFingerprint({ age: 25, name: "Alice" }, ["age", "name"]);
+      const b = rowFingerprint({ age: 25, name: "Alice" }, ["age", "name"]);
+      expect(a).toBe(b);
+    });
+
+    test("different content → different key", () => {
+      const a = rowFingerprint({ age: 25, name: "Alice" }, ["age", "name"]);
+      const b = rowFingerprint({ age: 26, name: "Alice" }, ["age", "name"]);
+      expect(a).not.toBe(b);
+    });
+
+    test("column order in the input is canonicalized (sort)", () => {
+      // Same row content, two different schema orderings — should match.
+      const a = rowFingerprint({ age: 25, name: "Alice" }, ["age", "name"]);
+      const b = rowFingerprint({ age: 25, name: "Alice" }, ["name", "age"]);
+      expect(a).toBe(b);
+    });
+
+    test("missing key and explicit null fingerprint identically", () => {
+      const a = rowFingerprint({ age: null, name: "Alice" }, ["age", "name"]);
+      // Note: `age` key not present on the second row at all.
+      const b = rowFingerprint({ name: "Alice" } as Record<string, unknown>, ["age", "name"]);
+      expect(a).toBe(b);
+    });
+
+    test("undefined value treated as null", () => {
+      const a = rowFingerprint({ age: undefined, name: "Alice" }, ["age", "name"]);
+      const b = rowFingerprint({ age: null, name: "Alice" }, ["age", "name"]);
+      expect(a).toBe(b);
+    });
+
+    test("JSON-special characters survive round-trip (quotes, backslashes, unicode)", () => {
+      // The contract is "String() then JSON.stringify", so the only thing to
+      // verify here is that the helper does *use* JSON.stringify (after the
+      // String() coercion that's a no-op on strings) — otherwise quote
+      // escaping would be lost and a string containing a field separator
+      // would mis-fingerprint. For strings, String(s) === s, so the expected
+      // output is JSON.stringify(s) per cell.
+      const row = { label: 'he said "hi"\\nbye', emoji: "🎉" };
+      const expected = JSON.stringify("🎉") + JSON.stringify('he said "hi"\\nbye');
+      // canonical column order is alphabetical: emoji, label
+      expect(rowFingerprint(row, ["label", "emoji"])).toBe(expected);
+    });
+
+    test("numbers and numeric strings ARE equivalent after String() coercion", () => {
+      // Texera's JSONL scan widens mixed-type columns to String (via
+      // `parseField(stringValue, schemaType)` in JSONLScanSourceOpExec), while
+      // DataGuard's parseJsonl preserves native JSON types. To make matches
+      // survive that schema-widening, both sides String()-coerce the cell
+      // before JSON.stringify — so `25` and `"25"` fingerprint identically.
+      const a = rowFingerprint({ x: 25 }, ["x"]);
+      const b = rowFingerprint({ x: "25" }, ["x"]);
+      expect(a).toBe(b);
+      // And the token shape is the quoted-string form.
+      expect(a).toBe('"25"');
+    });
+
+    test("floats fingerprint identically whether typed as number or string", () => {
+      // IEEE-754 ToString (ECMA-262 §7.1.17) is the same on V8 and Bun, so
+      // `String(28.1)` is "28.1" on both. The string side is trivially "28.1".
+      const a = rowFingerprint({ x: 28.1 }, ["x"]);
+      const b = rowFingerprint({ x: "28.1" }, ["x"]);
+      expect(a).toBe(b);
+      expect(a).toBe('"28.1"');
+    });
+
+    // Cross-language fingerprint contract: this is the *exact* string the
+    // frontend `findRowByKey` must produce for the same input. If the JSON
+    // tokens here drift between V8 and Bun, this test catches it before
+    // production. Format: JSON.stringify(String(value)) per non-null cell;
+    // null/undefined → bare `null` literal (no quotes).
+    test("contract example: known input produces known output (V8/Bun parity)", () => {
+      const row = { glucose: 180, patient_id: "p-7", group: null };
+      // canonical sort: glucose, group, patient_id
+      const key = rowFingerprint(row, ["patient_id", "group", "glucose"]);
+      // glucose: JSON.stringify(String(180)) = "\"180\""
+      // group:   null                         = "null"
+      // patient_id: JSON.stringify(String("p-7")) = "\"p-7\""
+      expect(key).toBe('"180"' + "null" + '"p-7"');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Per-detector affectedRowKeys emission — must be 1-to-1 aligned with
+  // affectedRowIndices, and absent when indices are absent (large-issue path).
+  // ---------------------------------------------------------------------------
+  describe("affectedRowKeys integration", () => {
+    test("missing-value issue carries keys aligned with indices", () => {
+      const ds: DatasetView = {
+        columns: ["age", "name"],
+        rows: [
+          { age: 25, name: "Alice" },
+          { age: null, name: "Bob" },
+          { age: 30, name: "Carol" },
+        ],
+      };
+      const issues = profileDataset(ds);
+      const miss = issues.find(i => i.issueType === "missing_value" && i.column === "age");
+      expect(miss!.affectedRowIndices).toEqual([1]);
+      expect(miss!.affectedRowKeys).toHaveLength(1);
+      // Re-fingerprint the same row to confirm match.
+      expect(miss!.affectedRowKeys![0]).toBe(rowFingerprint(ds.rows[1], ds.columns));
+    });
+
+    test("large-issue path omits both indices and keys", () => {
+      // Force the missing-value detector well over the cap, then assert that
+      // neither indices nor keys are emitted — preserves the existing
+      // maybeIndices behaviour.
+      const rows = Array.from({ length: 100 }, () => ({ x: null }));
+      const issues = profileDataset(
+        { columns: ["x"], rows },
+        { maxIndicesInIssue: 10 }
+      );
+      const miss = issues.find(i => i.issueType === "missing_value");
+      expect(miss!.affectedRowIndices).toBeUndefined();
+      expect(miss!.affectedRowKeys).toBeUndefined();
     });
   });
 });

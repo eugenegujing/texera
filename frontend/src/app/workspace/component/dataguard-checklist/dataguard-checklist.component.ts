@@ -84,11 +84,14 @@ export class DataGuardChecklistComponent implements OnInit, OnDestroy {
   private orchestrationSub?: Subscription;
 
   // Per-row cursor for the "📍" locate-cycle affordance. Keyed by `issueId`
-  // so each detector row gets an independent cursor. Cleared on every fresh
-  // scan push — different issueIds means stale keys would just become
-  // garbage, but a hard reset keeps memory bounded and the behaviour
-  // predictable. The cursor value is the index of the *next* click —
-  // i.e., on entry it is 0, and after navigating to indices[0] it becomes 1.
+  // so each detector row gets an independent cursor. We *purge stale keys* on
+  // every state push (rather than wiping the Map wholesale), so a benign
+  // re-emit — e.g., `updateEntry` after the user toggles an unrelated row's
+  // verdict — leaves the clicked row's cursor intact. Without this, repeat
+  // clicks on the same 📍 would jump back to 0 mid-cycle whenever an unrelated
+  // setState happened to fire between clicks. Cursor value is the index of
+  // the *next* click — i.e., on entry it is 0, and after navigating to
+  // indices[0] it becomes 1.
   private locateCursors = new Map<string, number>();
 
   constructor(
@@ -124,17 +127,18 @@ export class DataGuardChecklistComponent implements OnInit, OnDestroy {
   }
 
   ngOnInit(): void {
-    // Track the issueId set of the previous push. `updateEntry` rebuilds the
-    // entries array on every verdict toggle (`.map(...)`), so identity-compare
-    // would spuriously reset cursors mid-review. Instead, reset only when the
-    // *set of issueIds* changes — that's the actual "fresh scan" signal.
-    let lastIssueIdsKey: string | undefined;
+    // We keep the Subscription handle explicitly because the orchestration
+    // sub below is also kept that way (and torn down in ngOnDestroy). Using
+    // untilDestroyed here would mix patterns; the existing teardown is fine.
+    // eslint-disable-next-line rxjs-angular/prefer-takeuntil
     this.sub = this.results.getState$().subscribe(s => {
-      const key = s.entries.map(e => e.issueId).join("|");
-      if (key !== lastIssueIdsKey) {
-        this.locateCursors.clear();
-        lastIssueIdsKey = key;
-      }
+      // Purge stale cursors instead of clearing the whole Map. A live issueId
+      // keeps its cursor across any re-emit, so repeated 📍 clicks survive
+      // benign state pushes (verdict toggles, status messages, etc.). Truly
+      // fresh scans replace the issueId set wholesale, so every old key is
+      // dropped here — bounded memory, no leak. Same-id-set re-emits do zero
+      // mutations to the Map.
+      DataGuardRowNavigatorService.purgeStaleCursors(this.locateCursors, new Set(s.entries.map(e => e.issueId)));
       this.scan = s;
       // Tally once per state push instead of three full-walks per CD tick.
       let allow = 0,
@@ -255,7 +259,7 @@ export class DataGuardChecklistComponent implements OnInit, OnDestroy {
    * event in a microtask — otherwise our subscriber on the table side may not
    * exist yet on the first click after a panel close.
    */
-  public onShowInResultPanel(entry: ChecklistEntry): void {
+  public async onShowInResultPanel(entry: ChecklistEntry): Promise<void> {
     const opId = this.scan.sourceOperatorId;
     if (!opId) {
       this.notificationService.warning("DataGuard: no source operator recorded for this scan.");
@@ -286,9 +290,7 @@ export class DataGuardChecklistComponent implements OnInit, OnDestroy {
       return;
     }
     if (rowIndices.length === 0) {
-      this.notificationService.info(
-        "DataGuard: opened the result panel — no rows are affected by this issue."
-      );
+      this.notificationService.info("DataGuard: opened the result panel — no rows are affected by this issue.");
       return;
     }
     // Cycle through affectedRowIndices: each click advances this row's cursor
@@ -296,15 +298,82 @@ export class DataGuardChecklistComponent implements OnInit, OnDestroy {
     // panel re-pulses on every click. Pure helper for testability.
     const cursor = this.locateCursors.get(entry.issueId) ?? 0;
     const step = DataGuardRowNavigatorService.nextCycleStep(rowIndices, cursor);
-    this.locateCursors.set(entry.issueId, step.nextCursor);
+
+    // Branch on the source operator's type to pick the right locate flavour.
+    // CSV scans (CSVFileScan, CSVOldFileScan) run with a single Texera worker
+    // so the result-panel display order matches the file-byte order the
+    // profiler indexed against — the simple synchronous index path is correct
+    // and we skip the fingerprint + flash-confirmed dance entirely. JSONL
+    // (and any future shuffled-output scan) keeps the round-4 flash-confirmed
+    // contract so we don't silently skip rows under a worker shuffle.
+    //
+    // We already validated `operatorExists` above against
+    // `getAllOperators()`, so `getOperator(opId)` should return the same
+    // record this tick. If it returns `undefined` anyway — operator was
+    // deleted between the existence check and here, or never registered —
+    // we fall through to the JSONL path: the safer default. It awaits a
+    // flash that will never arrive, but the 36 s navigate() timeout resolves
+    // `false` and the cursor stays put, which is exactly what we want for
+    // a vanished operator. No throw, no notification spam.
+    const opType = this.workflowActionService.getTexeraGraph().getOperator(opId)?.operatorType;
+    const isCsvLike = opType === "CSVFileScan" || opType === "CSVOldFileScan";
+
     // Defer one microtask so the table frame mounts before we ask it to page.
-    queueMicrotask(() =>
-      this.rowNavigator.navigate({
+    // Applies to both branches because openResultPanel() above triggers a CD
+    // tick to instantiate the frame via NgComponentOutlet.
+    await new Promise<void>(resolve => queueMicrotask(resolve));
+
+    if (isCsvLike) {
+      // Synchronous-style path: advance the cursor immediately and
+      // fire-and-forget navigate(). We deliberately do NOT pass `rowKey` —
+      // result-table-frame routes to handleLocateByIndex when rowKey is
+      // absent, which is the simple page-by-index walk that CSV's
+      // file-byte-ordered display can rely on. The navigate Promise still
+      // settles (success or 36 s timeout) but we don't await it; if it
+      // returned `false` it would have no effect anyway because the cursor
+      // is already advanced — and the user clicks again to move on.
+      this.locateCursors.set(entry.issueId, step.nextCursor);
+      void this.rowNavigator.navigate({
         operatorId: opId,
         rowIndex: step.value,
         column: entry.issue.column,
-      })
-    );
+        // rowKey intentionally omitted — forces the index path on the table side.
+      });
+      return;
+    }
+
+    // JSONL / shuffled-output path: prefer content-based row matching
+    // (`rowKey`) over the profiler-side index. Texera's JSONL multi-worker
+    // scan shuffles rows out of file order, so the profiler's index 4 may
+    // map to display index 11 (or any other). The result-table-frame falls
+    // back to the index when `rowKey` cannot be found in the loaded data.
+    const rowKeys = entry.issue.affectedRowKeys;
+    let rowKey: string | undefined;
+    if (rowKeys && rowKeys.length === rowIndices.length) {
+      const safeCursor = Number.isFinite(cursor) && cursor >= 0 ? Math.floor(cursor) : 0;
+      rowKey = rowKeys[safeCursor % rowKeys.length];
+    } else if (rowKeys === undefined) {
+      // Server omitted fingerprints (e.g., issue was too large to enumerate).
+      // Surface a hint so users aren't surprised when the highlight lands on
+      // the wrong row in a shuffled result panel.
+      this.notificationService.info(
+        "DataGuard: cell highlight may be inaccurate — row fingerprints weren't recorded for this issue."
+      );
+    }
+
+    // Flash-confirmed advancement: only commit the cursor when the table
+    // frame actually pulsed the row. A `false` (timeout, supersede, no
+    // match) leaves the cursor where it was so the next click retries the
+    // same target instead of silently skipping it — the round-4 contract.
+    const flashed = await this.rowNavigator.navigate({
+      operatorId: opId,
+      rowIndex: step.value,
+      rowKey,
+      column: entry.issue.column,
+    });
+    if (flashed) {
+      this.locateCursors.set(entry.issueId, step.nextCursor);
+    }
   }
 
   // ---------------- display helpers ----------------

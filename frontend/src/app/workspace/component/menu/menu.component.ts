@@ -494,9 +494,7 @@ export class MenuComponent implements OnInit, OnDestroy {
   public onToggleDataGuard(): void {
     const wid = this.workflowActionService.getWorkflowMetadata()?.wid;
     if (wid === undefined) {
-      this.notificationService.warning(
-        "Save the workflow first — DataGuard's setting is stored per workflow."
-      );
+      this.notificationService.warning("Save the workflow first — DataGuard's setting is stored per workflow.");
       return;
     }
     const next = this.dataGuardSettings.toggle(wid);

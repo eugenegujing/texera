@@ -67,6 +67,23 @@ export interface DataQualityIssue {
   // Present only when the affected set is small enough to enumerate; otherwise
   // omit and rely on `evidence` for a sample / aggregate description.
   affectedRowIndices?: number[];
+  /**
+   * Per-affected-row stable string keys used by the frontend `locate` feature
+   * to find the right cell even when the result panel reorders rows (e.g.,
+   * Texera JSONL multi-worker output shuffle). Aligned 1-to-1 with
+   * `affectedRowIndices` when both are present.
+   *
+   * Fingerprint contract (must match the frontend `findRowByKey` helper):
+   *   - Sort the dataset's columns alphabetically into a canonical order.
+   *   - For each column, take the cell value (treating `undefined` and missing
+   *     keys the same as `null`) and `JSON.stringify` it.
+   *   - Concatenate the resulting strings in canonical-column order with no
+   *     separator. The empty string is intentional: any non-empty separator
+   *     could itself appear inside a JSON-stringified value, so concatenating
+   *     adjacent JSON tokens is unambiguous (each token is self-delimited by
+   *     its leading quote / brace / bracket / digit).
+   */
+  affectedRowKeys?: string[];
   detectedAt: string;
 }
 

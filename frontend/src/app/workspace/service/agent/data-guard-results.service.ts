@@ -29,6 +29,14 @@ export interface DataQualityIssue {
   evidence: string;
   affectedRowCount: number;
   affectedRowIndices?: number[];
+  /**
+   * Per-affected-row content fingerprints, 1-to-1 aligned with
+   * `affectedRowIndices`. Used by the result-panel locate feature to find the
+   * affected row even when Texera's multi-worker JSONL scan shuffles rows out
+   * of file-byte order. See `DataGuardRowNavigatorService.rowFingerprint` for
+   * the contract — it must stay identical to the agent-service helper.
+   */
+  affectedRowKeys?: string[];
   detectedAt: string;
 }
 

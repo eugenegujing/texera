@@ -70,6 +70,72 @@ function maybeIndices(
   return indices.length <= cap ? indices : undefined;
 }
 
+/**
+ * Deterministic, content-based fingerprint for a dataset row.
+ *
+ * Used to align profiler issues (which see file-byte-order rows) with the
+ * Texera result panel (which may show rows in a worker-shuffled order — the
+ * JSONL multi-worker scan is the motivating case). The frontend recomputes the
+ * same fingerprint over the rows it has loaded and matches by string equality.
+ *
+ * Contract (must be byte-identical to `findRowByKey` in
+ * `data-guard-row-navigator.service.ts`):
+ *   - Columns are sorted alphabetically (`Array#sort()` default locale-agnostic
+ *     compare on the UTF-16 code-unit order) to canonicalize the schema. This
+ *     guarantees the same key regardless of column-display reordering on
+ *     either side.
+ *   - For each column in canonical order: read the cell value; `undefined`
+ *     (incl. completely-missing keys) is coerced to `null` so it produces the
+ *     same string as an explicit null cell.
+ *   - Each non-null cell is normalised to its string form via `String(v)`
+ *     before `JSON.stringify`, so number `45` and string `"45"` produce the
+ *     same token. This matters because Texera's JSONL scan widens mixed-type
+ *     columns to String (`JSONToMap` + `parseField(stringValue, schemaType)`),
+ *     while DataGuard's own `parseJsonl` keeps native JSON types — without
+ *     the coercion the two sides fingerprint differently and `findRowByKey`
+ *     misses every row in mixed-type columns.
+ *   - Null / undefined / missing keys emit the bare token `null` (no quotes).
+ *   - The individual JSON tokens are concatenated with an empty separator;
+ *     because each token is self-delimited (`"…"` or the literal `null`),
+ *     no ambiguity is introduced.
+ *
+ * Edge cases handled:
+ *   - Missing key vs explicit null → identical fingerprint (`null`).
+ *   - JSON-stringify special characters (quotes, backslashes, unicode) → the
+ *     standard JSON.stringify escapes apply identically on V8 (Texera frontend)
+ *     and on Bun (agent-service).
+ *   - Floats round-trip through `String()` identically on V8 and Bun (both
+ *     implement IEEE-754 ToString per ECMA-262 §7.1.17).
+ */
+function fingerprintCell(v: unknown): string {
+  if (v === null || v === undefined) return "null";
+  return JSON.stringify(String(v));
+}
+
+export function rowFingerprint(
+  row: Record<string, unknown>,
+  columns: ReadonlyArray<string>
+): string {
+  const canonical = [...columns].sort();
+  let out = "";
+  for (const c of canonical) {
+    out += fingerprintCell(row[c]);
+  }
+  return out;
+}
+
+function maybeKeys(
+  indices: number[] | undefined,
+  rows: ReadonlyArray<Record<string, unknown>>,
+  columns: ReadonlyArray<string>
+): string[] | undefined {
+  // Mirror the contract: only emit keys when indices are present. Large-issue
+  // path (indices === undefined) stays key-less so we don't waste payload
+  // bytes when the frontend can't display them all anyway.
+  if (indices === undefined) return undefined;
+  return indices.map(i => rowFingerprint(rows[i], columns));
+}
+
 // Guess which column is the row identifier when the caller didn't specify one.
 // Conservative: only matches columns whose names look unambiguously like IDs.
 // Tries the cheapest, most-specific patterns first so e.g. `sample_id` wins
@@ -82,6 +148,14 @@ function inferIdColumn(columns: ReadonlyArray<string>): string | undefined {
     name => /^id_/i.test(name),
     name => /Id$/.test(name),
     name => /^.+_uid$/i.test(name) || /^uid$/i.test(name),
+    // JSONL flatten produces dot-notation column names like `user.id` or
+    // `customer.uid`. The underscore-based matchers above don't catch these
+    // (the dot is not an underscore, and `Id$` is case-sensitive so a
+    // lowercase `id` at the trailing segment misses too). Add dot-anchored
+    // patterns so the auto-trigger's dup-ID detection still works on
+    // JSONL-loaded data.
+    name => /\.id$/i.test(name),
+    name => /\.uid$/i.test(name),
   ];
   for (const m of matchers) {
     const hit = columns.find(c => m(c));
@@ -121,6 +195,7 @@ export function profileDataset(
     }
     if (missingIndices.length === 0) continue;
     const pct = (missingIndices.length / Math.max(dataset.rows.length, 1)) * 100;
+    const idx = maybeIndices(missingIndices, indexCap);
     issues.push({
       issueId: nextIssueId(),
       issueType: "missing_value",
@@ -128,7 +203,8 @@ export function profileDataset(
       description: `${missingIndices.length} row(s) have missing ${col}`,
       evidence: `Missing: ${missingIndices.length} of ${dataset.rows.length} (${pct.toFixed(1)}%)`,
       affectedRowCount: missingIndices.length,
-      affectedRowIndices: maybeIndices(missingIndices, indexCap),
+      affectedRowIndices: idx,
+      affectedRowKeys: maybeKeys(idx, dataset.rows, dataset.columns),
       detectedAt,
     });
   }
@@ -139,6 +215,7 @@ export function profileDataset(
     if (hits.size === 0) continue;
     const indices = Array.from(hits.keys()).sort((a, b) => a - b);
     const distinctValues = Array.from(new Set(hits.values()));
+    const idx = maybeIndices(indices, indexCap);
     issues.push({
       issueId: nextIssueId(),
       issueType: "placeholder_value",
@@ -146,7 +223,8 @@ export function profileDataset(
       description: `${indices.length} row(s) in ${col} contain placeholder value(s): ${distinctValues.join(", ")}`,
       evidence: `Placeholder(s) ${distinctValues.join(", ")} appear ${indices.length} time(s) in ${col}.`,
       affectedRowCount: indices.length,
-      affectedRowIndices: maybeIndices(indices, indexCap),
+      affectedRowIndices: idx,
+      affectedRowKeys: maybeKeys(idx, dataset.rows, dataset.columns),
       detectedAt,
     });
   }
@@ -178,6 +256,7 @@ export function profileDataset(
     }
     if (duplicateIndices.length > 0) {
       duplicateIndices.sort((a, b) => a - b);
+      const idx = maybeIndices(duplicateIndices, indexCap);
       issues.push({
         issueId: nextIssueId(),
         issueType: "duplicate_id",
@@ -185,7 +264,8 @@ export function profileDataset(
         description: `${duplicateKeys.length} duplicate ID(s) in ${idCol} affecting ${duplicateIndices.length} row(s)`,
         evidence: `Duplicate keys (showing up to 5): ${duplicateKeys.slice(0, 5).join(", ")}`,
         affectedRowCount: duplicateIndices.length,
-        affectedRowIndices: maybeIndices(duplicateIndices, indexCap),
+        affectedRowIndices: idx,
+        affectedRowKeys: maybeKeys(idx, dataset.rows, dataset.columns),
         detectedAt,
       });
     }
@@ -249,6 +329,7 @@ export function profileDataset(
       }
       if (inconsistentRows.length === 0) continue;
       inconsistentRows.sort((a, b) => a - b);
+      const idx = maybeIndices(inconsistentRows, indexCap);
       issues.push({
         issueId: nextIssueId(),
         issueType: "inconsistent_label",
@@ -256,7 +337,8 @@ export function profileDataset(
         description: `${inconsistentRows.length} row(s) in ${col} use non-canonical label spellings`,
         evidence: `Mixed spellings (showing up to 3): ${examples.slice(0, 3).join(", ")}`,
         affectedRowCount: inconsistentRows.length,
-        affectedRowIndices: maybeIndices(inconsistentRows, indexCap),
+        affectedRowIndices: idx,
+        affectedRowKeys: maybeKeys(idx, dataset.rows, dataset.columns),
         detectedAt,
       });
     }
@@ -280,6 +362,7 @@ export function profileDataset(
         if (v < range.min || v > range.max) outlierIndices.push(i);
       }
       if (outlierIndices.length === 0) continue;
+      const idx = maybeIndices(outlierIndices, indexCap);
       issues.push({
         issueId: nextIssueId(),
         issueType: "outlier",
@@ -287,7 +370,8 @@ export function profileDataset(
         description: `${outlierIndices.length} row(s) in ${col} fall outside the valid range [${range.min}, ${range.max}]`,
         evidence: `Valid range: [${range.min}, ${range.max}]; violations: ${outlierIndices.length}.`,
         affectedRowCount: outlierIndices.length,
-        affectedRowIndices: maybeIndices(outlierIndices, indexCap),
+        affectedRowIndices: idx,
+        affectedRowKeys: maybeKeys(idx, dataset.rows, dataset.columns),
         detectedAt,
       });
     }

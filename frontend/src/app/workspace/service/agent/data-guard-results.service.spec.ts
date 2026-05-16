@@ -20,12 +20,7 @@
 import { TestBed } from "@angular/core/testing";
 import { firstValueFrom } from "rxjs";
 import { take } from "rxjs/operators";
-import {
-  DataGuardResultsService,
-  ChecklistEntry,
-  DataQualityIssue,
-  FixProposal,
-} from "./data-guard-results.service";
+import { DataGuardResultsService, ChecklistEntry, DataQualityIssue, FixProposal } from "./data-guard-results.service";
 
 function makeIssue(issueId: string): DataQualityIssue {
   return {

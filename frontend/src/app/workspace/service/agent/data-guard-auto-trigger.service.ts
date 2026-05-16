@@ -25,15 +25,11 @@ import { OperatorPredicate } from "../../types/workflow-common.interface";
 import { WorkflowActionService } from "../workflow-graph/model/workflow-action.service";
 import { AgentService, AgentInfo } from "./agent.service";
 import { DataGuardSettingsService } from "./data-guard-settings.service";
-import {
-  DataGuardResultsService,
-  ChecklistEntry,
-  DataQualityIssue,
-  FixProposal,
-} from "./data-guard-results.service";
+import { DataGuardResultsService, ChecklistEntry, DataQualityIssue, FixProposal } from "./data-guard-results.service";
 import { NotificationService } from "../../../common/service/notification/notification.service";
 import { DatasetService } from "../../../dashboard/service/user/dataset/dataset.service";
 import { ExecuteWorkflowService } from "../execute-workflow/execute-workflow.service";
+import { parseJsonl } from "./data-guard-jsonl";
 
 /**
  * DataGuard auto-trigger orchestration — checklist-driven flow.
@@ -55,16 +51,91 @@ import { ExecuteWorkflowService } from "../execute-workflow/execute-workflow.ser
  * Toggle: DataGuardSettingsService gates the pipeline (per-workflow,
  * default ON, controlled by toolbar 🛡 shield button).
  */
+/**
+ * Per-parser options. Optional; each parser ignores keys it doesn't care about.
+ *  - `delimiter`: explicit field separator to override Papa's autodetect. Used
+ *    by `CSVOldFileScan`, whose Scala impl overrides scala-csv's delimiter via
+ *    the operator's `customDelimiter` property (`,` / `;` / `\t` / …). Without
+ *    this, Papa's autodetect *usually* picks the right one but isn't strict
+ *    equivalence — a `;`-delimited file would round-trip differently than the
+ *    operator's own reader.
+ */
+export interface ParserOptions {
+  delimiter?: string;
+}
+
+/**
+ * A `DatasetParser` converts a raw file Blob into the {columns, rows} shape the
+ * agent-service `/dataguard/dataset` endpoint expects. Each format gets its own
+ * parser so we don't `Papa.parse` JSON / Parquet / TSV bytes and produce
+ * garbage rows.
+ *
+ * Returning `Promise` lets a parser do streaming or chunked reads (Parquet
+ * decoders, JSONL line readers) without changing the caller contract.
+ */
+export type DatasetParser = (
+  blob: Blob,
+  fileName: string,
+  options?: ParserOptions
+) => Promise<{ columns: string[]; rows: Record<string, unknown>[] }>;
+
+/**
+ * Parse a Blob assumed to be RFC-4180 CSV with a header row. Shared by every
+ * CSV-shaped operator (`CSVFileScan`, `CSVOldFileScan`). CSVOld's Scala impl
+ * (CSVOldScanSourceOpExec) uses scala-csv with `DefaultCSVFormat`, which is
+ * RFC-4180 — so the bytes are byte-for-byte the same shape, only the runtime
+ * wrapper differs. No CSVOld-specific variant is needed; we just register
+ * `parseCsv` for both keys.
+ *
+ * If `options.delimiter` is provided we pass it through to Papa instead of
+ * relying on Papa's autodetect — necessary for CSVOldFileScan, which exposes
+ * a `customDelimiter` operator property (`,` is the default but the user can
+ * set `;`, `\t`, or anything else).
+ *
+ * `ParallelCSVFileScan` was removed from this dispatcher because Texera has
+ * disabled it in the operator registry (see LogicalOp.scala:171 — the type
+ * registration is commented out so users can't drop one onto the canvas).
+ * If it gets re-enabled later, add the key back here in one line.
+ */
+export const parseCsv: DatasetParser = async (blob, _fileName, options) => {
+  const text = await blob.text();
+  const parseConfig: Papa.ParseConfig<Record<string, unknown>> = {
+    header: true,
+    skipEmptyLines: true,
+    dynamicTyping: true,
+  };
+  if (options?.delimiter) {
+    parseConfig.delimiter = options.delimiter;
+  }
+  const parsed = Papa.parse<Record<string, unknown>>(text, parseConfig);
+  if (parsed.errors.length > 0) {
+    throw new Error(`CSV parse failed: ${parsed.errors[0].message} (row ${parsed.errors[0].row})`);
+  }
+  return {
+    columns: parsed.meta.fields ?? [],
+    rows: parsed.data,
+  };
+};
+
+/**
+ * Operator-type → parser dispatch table. Exported so tests can assert the
+ * mapping is correct without instantiating the full service.
+ */
+export const PARSERS: Record<string, DatasetParser> = {
+  CSVFileScan: parseCsv,
+  CSVOldFileScan: parseCsv,
+  // JSONL flattens nested objects into dot-notation columns so the five
+  // detectors fire identically on JSONL-loaded data as on CSV-loaded data.
+  // See data-guard-jsonl.ts for the full flatten policy + collision rule.
+  JSONLFileScan: parseJsonl,
+};
+
 @Injectable({ providedIn: "root" })
 export class DataGuardAutoTriggerService {
-  // CSV-only for MVP — `loadFromOperatorFile` blindly Papa.parses every blob,
-  // so JSON / Table / Parquet operators would either crash or produce garbage
-  // rows. Per-format parsing is the obvious follow-up; until then narrowing
-  // the trigger set is honest. See §16.4 of README_DataGuard_Texera.md.
-  private static readonly DATASET_OPERATOR_TYPES = new Set<string>([
-    "CSVFileScan",
-    "ParallelCSVFileScan",
-  ]);
+  // Auto-trigger fires only for operators whose type is a key in `PARSERS`.
+  // Adding a new format = add to PARSERS + this set in lockstep (see post-MVP
+  // §19 of README_DataGuard_Texera.md for the broader format roadmap).
+  private static readonly DATASET_OPERATOR_TYPES = new Set<string>(["CSVFileScan", "CSVOldFileScan", "JSONLFileScan"]);
 
   /** Dedup: re-orchestrate only if (operatorID, filePath) changes. */
   private readonly lastOrchestratedFile = new Map<string, string>();
@@ -206,9 +277,10 @@ export class DataGuardAutoTriggerService {
   public startOrchestration(): Subscription {
     const graph = this.workflowActionService.getTexeraGraph();
     const addStream$ = graph.getOperatorAddStream();
-    const propertyStream$ = graph
-      .getOperatorPropertyChangeStream()
-      .pipe(debounceTime(500), map(event => event.operator));
+    const propertyStream$ = graph.getOperatorPropertyChangeStream().pipe(
+      debounceTime(500),
+      map(event => event.operator)
+    );
 
     return merge(addStream$, propertyStream$)
       .pipe(filter(op => this.isDatasetOperatorType(op.operatorType)))
@@ -253,10 +325,7 @@ export class DataGuardAutoTriggerService {
     };
     try {
       applyResp = await firstValueFrom(
-        this.http.post<typeof applyResp>(
-          `/api/agents/${state.agentId}/dataguard/apply-batch`,
-          { decisions }
-        )
+        this.http.post<typeof applyResp>(`/api/agents/${state.agentId}/dataguard/apply-batch`, { decisions })
       );
     } catch (e: unknown) {
       const msg = this.extractMessage(e);
@@ -300,8 +369,14 @@ export class DataGuardAutoTriggerService {
     }
 
     try {
-      this.results.setState({ message: `Saving cleaned data as a new version…` });
-      const newPath = await this.writeBackAsNewVersion(state.agentId, sourceFile);
+      this.results.setState({ message: "Saving cleaned data as a new version…" });
+      // Look up the source operator's type so writeBackAsNewVersion picks the
+      // matching export endpoint (export-csv vs export-jsonl). If the operator
+      // has been deleted while we were applying, fall back to CSV — that's the
+      // historical default and downstream still rejects the path if needed.
+      const sourceOp = this.workflowActionService.getTexeraGraph().getOperator(opId);
+      const sourceOpType = sourceOp?.operatorType ?? "";
+      const newPath = await this.writeBackAsNewVersion(state.agentId, sourceFile, sourceOpType);
 
       // Step 4 — repoint the operator at the cleaned version
       const graph = this.workflowActionService.getTexeraGraph();
@@ -348,13 +423,28 @@ export class DataGuardAutoTriggerService {
    * `sourceFile` is the path the operator was reading from, in the canonical
    * format `/ownerEmail/datasetName/versionName/fileRelativePath`.
    */
-  private async writeBackAsNewVersion(agentId: string, sourceFile: string): Promise<string> {
-    // 1. Pull cleaned CSV from agent-service
-    const csvBlob = await firstValueFrom(
-      this.http.get(`/api/agents/${agentId}/dataguard/export-csv`, { responseType: "blob" })
+  private async writeBackAsNewVersion(agentId: string, sourceFile: string, sourceOpType: string): Promise<string> {
+    // 1. Pull cleaned data from agent-service. The endpoint + MIME type +
+    // fallback extension depend on the source operator type. Everything else
+    // in this method (LakeFS commit, operator-repoint, auto-rescan) is
+    // format-agnostic and stays untouched.
+    //
+    // Filename policy: we PRESERVE the source file's original name (extension
+    // included). The `fallbackName` below is used only when the source path
+    // is degenerate (no trailing segment). We deliberately do NOT rewrite the
+    // extension based on body format — LakeFS doesn't care about extensions,
+    // and rewriting "data.json → data.jsonl" would silently change the
+    // operator's perceived file identity. Reuse-in-place is the contract.
+    const isJsonl = sourceOpType === "JSONLFileScan";
+    const exportPath = isJsonl ? "export-jsonl" : "export-csv";
+    const mimeType = isJsonl ? "application/x-ndjson" : "text/csv";
+    const fallbackName = isJsonl ? "cleaned.jsonl" : "cleaned.csv";
+
+    const dataBlob = await firstValueFrom(
+      this.http.get(`/api/agents/${agentId}/dataguard/${exportPath}`, { responseType: "blob" })
     );
-    const fileName = sourceFile.split("/").pop() || "cleaned.csv";
-    const csvFile = new File([csvBlob], fileName, { type: "text/csv" });
+    const fileName = sourceFile.split("/").pop() || fallbackName;
+    const cleanedFile = new File([dataBlob], fileName, { type: mimeType });
 
     // 2. Parse source path: /ownerEmail/datasetName/versionName/fileRelative...
     const parts = sourceFile.replace(/^\/+/, "").split("/");
@@ -366,9 +456,7 @@ export class DataGuardAutoTriggerService {
 
     // 3. Find dataset (need its did + write access)
     const datasets = await firstValueFrom(this.datasetService.retrieveAccessibleDatasets());
-    const match = datasets.find(
-      d => d.ownerEmail === ownerEmail && d.dataset.name === datasetName
-    );
+    const match = datasets.find(d => d.ownerEmail === ownerEmail && d.dataset.name === datasetName);
     if (!match || !match.dataset.did) {
       throw new Error(`dataset "${ownerEmail}/${datasetName}" not accessible to you`);
     }
@@ -376,11 +464,11 @@ export class DataGuardAutoTriggerService {
       throw new Error(`you don't have write access to "${ownerEmail}/${datasetName}"`);
     }
 
-    // 4. Multipart-upload as a single part (CSVs are small for a hackathon demo)
-    const partSize = Math.max(csvFile.size, 5 * 1024 * 1024); // LakeFS likes ≥5MB parts but accepts last
+    // 4. Multipart-upload as a single part (cleaned files are small for a hackathon demo)
+    const partSize = Math.max(cleanedFile.size, 5 * 1024 * 1024); // LakeFS likes ≥5MB parts but accepts last
     await firstValueFrom(
       this.datasetService
-        .multipartUpload(ownerEmail, datasetName, fileRelativePath, csvFile, partSize, 1, true)
+        .multipartUpload(ownerEmail, datasetName, fileRelativePath, cleanedFile, partSize, 1, true)
         .pipe(filter(p => p.status === "finished"))
     );
 
@@ -389,9 +477,7 @@ export class DataGuardAutoTriggerService {
     // "DataGuard cleaned" v2) doesn't collide on the version name — every run
     // gets a fresh unique version instead of failing.
     const versionLabel = `DataGuard cleaned ${this.timestampSuffix()}`;
-    const newVersion = await firstValueFrom(
-      this.datasetService.createDatasetVersion(match.dataset.did, versionLabel)
-    );
+    const newVersion = await firstValueFrom(this.datasetService.createDatasetVersion(match.dataset.did, versionLabel));
 
     return `/${ownerEmail}/${datasetName}/${newVersion.name}/${fileRelativePath}`;
   }
@@ -452,9 +538,7 @@ export class DataGuardAutoTriggerService {
           state: "idle",
           message: undefined,
         });
-        this.notificationService.warning(
-          "DataGuard: set the operator's file path before scanning."
-        );
+        this.notificationService.warning("DataGuard: set the operator's file path before scanning.");
       }
       return;
     }
@@ -525,10 +609,10 @@ export class DataGuardAutoTriggerService {
         agentId,
         state: "scanning",
         entries: [],
-        message: `Loading dataset…`,
+        message: "Loading dataset…",
       });
 
-      const loaded = await this.loadFromOperatorFile(agentId, filePath);
+      const loaded = await this.loadFromOperatorFile(agentId, filePath, op);
 
       this.results.setState({
         datasetSource: loaded.source,
@@ -536,18 +620,14 @@ export class DataGuardAutoTriggerService {
         datasetColumns: loaded.columns,
         message: `Checking ${loaded.rows} rows for problems…`,
       });
-      this.notificationService.info(
-        `DataGuard is checking ${loaded.rows} rows from ${loaded.source}…`
-      );
+      this.notificationService.info(`DataGuard is checking ${loaded.rows} rows from ${loaded.source}…`);
 
       // Phase 2: server-side scan (NO chat involved — bypasses LLM ReAct loop)
       const scan: {
         issueCount: number;
         issues: DataQualityIssue[];
         proposals: Array<{ issueId: string; proposal: FixProposal | null; error: string | null }>;
-      } = await firstValueFrom(
-        this.http.post<any>(`/api/agents/${agentId}/dataguard/scan`, {})
-      );
+      } = await firstValueFrom(this.http.post<any>(`/api/agents/${agentId}/dataguard/scan`, {}));
 
       const entries: ChecklistEntry[] = scan.issues.map(issue => {
         const p = scan.proposals.find(x => x.issueId === issue.issueId);
@@ -566,9 +646,10 @@ export class DataGuardAutoTriggerService {
       this.results.setState({
         state: "ready",
         entries,
-        message: scan.issueCount === 0
-          ? "Your data looks good — nothing to fix."
-          : `Found ${scan.issueCount} thing${scan.issueCount === 1 ? "" : "s"} we can clean up. Pick which to fix.`,
+        message:
+          scan.issueCount === 0
+            ? "Your data looks good — nothing to fix."
+            : `Found ${scan.issueCount} thing${scan.issueCount === 1 ? "" : "s"} we can clean up. Pick which to fix.`,
         sourceOperatorId: op.operatorID,
         sourceFilePath: filePath,
       });
@@ -595,35 +676,66 @@ export class DataGuardAutoTriggerService {
     return typeof v === "string" ? v.trim() : "";
   }
 
+  /**
+   * Load a dataset file into the agent's DataGuardSession. Dispatches to a
+   * per-format parser via the `PARSERS` table so we don't `Papa.parse` JSON or
+   * Parquet bytes. If no parser is registered for the operator type we surface
+   * a visible error (toast + thrown) — silent no-op was the pre-dispatcher
+   * footgun.
+   *
+   * Passes the operator's relevant properties through to the parser as
+   * `ParserOptions`. Today the only consumer is CSVOldFileScan's
+   * `customDelimiter`; future formats can extend `ParserOptions` (and this
+   * extractor) without churning the parser signature.
+   */
   private async loadFromOperatorFile(
     agentId: string,
-    filePath: string
+    filePath: string,
+    op: OperatorPredicate
   ): Promise<{ source: string; rows: number; columns: number }> {
-    const blob = await firstValueFrom(this.datasetService.retrieveDatasetVersionSingleFile(filePath));
-    const text = await blob.text();
-    const parsed = Papa.parse<Record<string, unknown>>(text, {
-      header: true,
-      skipEmptyLines: true,
-      dynamicTyping: true,
-    });
-    if (parsed.errors.length > 0) {
-      throw new Error(`CSV parse failed: ${parsed.errors[0].message} (row ${parsed.errors[0].row})`);
+    const operatorType = op.operatorType;
+    const parser = PARSERS[operatorType];
+    if (!parser) {
+      const msg =
+        `DataGuard: no parser registered for operator type "${operatorType}". ` +
+        `Supported types: ${Object.keys(PARSERS).join(", ")}.`;
+      this.notificationService.error(msg);
+      throw new Error(msg);
     }
-    const columns = parsed.meta.fields ?? [];
-    const rows = parsed.data;
-    await firstValueFrom(
-      this.http.post(`/api/agents/${agentId}/dataguard/dataset`, { columns, rows })
-    );
+    const parserOptions = DataGuardAutoTriggerService.extractParserOptions(op);
+    const fileName = filePath.split("/").pop() || filePath;
+    const blob = await firstValueFrom(this.datasetService.retrieveDatasetVersionSingleFile(filePath));
+    const { columns, rows } = await parser(blob, fileName, parserOptions);
+    await firstValueFrom(this.http.post(`/api/agents/${agentId}/dataguard/dataset`, { columns, rows }));
     return { source: filePath, rows: rows.length, columns: columns.length };
+  }
+
+  /**
+   * Pure helper: pull format-specific knobs off an operator's properties into
+   * a `ParserOptions`. Exposed as static so tests can exercise the mapping
+   * without a TestBed harness.
+   *
+   * Today this only handles `CSVOldFileScan.customDelimiter`. Empty / missing
+   * delimiter falls back to Papa autodetect (matches the Scala side, which
+   * also defaults to `,` when `customDelimiter` is empty).
+   */
+  public static extractParserOptions(op: OperatorPredicate): ParserOptions {
+    const opts: ParserOptions = {};
+    if (op.operatorType === "CSVOldFileScan") {
+      const props = (op.operatorProperties ?? {}) as Record<string, unknown>;
+      const raw = props["customDelimiter"];
+      if (typeof raw === "string" && raw.length > 0) {
+        opts.delimiter = raw;
+      }
+    }
+    return opts;
   }
 
   private async ensureAgent(workflowId: number): Promise<string> {
     const all: AgentInfo[] = await firstValueFrom(this.agentService.getAllAgents());
     const match = all.find(a => a.delegate?.workflowId === workflowId);
     if (match) return match.id;
-    const created = await firstValueFrom(
-      this.agentService.createAgent("claude-haiku-4.5", "DataGuard", workflowId)
-    );
+    const created = await firstValueFrom(this.agentService.createAgent("claude-haiku-4.5", "DataGuard", workflowId));
     return created.id;
   }
 }

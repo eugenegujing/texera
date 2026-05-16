@@ -125,7 +125,6 @@ export class AgentPanelComponent implements OnInit, OnDestroy, OnChanges {
         // Try to activate the agent if agentIdToActivate is set
         this.tryActivateAgentFromInput();
       });
-
   }
 
   ngOnChanges(changes: SimpleChanges): void {
