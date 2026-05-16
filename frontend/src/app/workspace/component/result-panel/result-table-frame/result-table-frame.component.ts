@@ -287,8 +287,10 @@ export class ResultTableFrameComponent implements OnInit, OnChanges, OnDestroy {
    * Locate a row by its content fingerprint (`rowKey`). Scans the currently
    * loaded page first (fast path — common when the issue is on the first
    * page); on a miss walks subsequent pages up to LOCATE_BY_KEY_MAX_PAGES.
-   * When no match is found anywhere, toasts the user and leaves the operator
-   * highlighted but un-flashed.
+   * When no match is found anywhere, emits `flashed: false` — the checklist
+   * caller observes the false outcome and surfaces a "row not found" toast,
+   * since at that point the data has drifted from the scan and silently
+   * highlighting a byte-order-index row would mislead the user.
    *
    * Same operator-id captured-at-click-time guard as the index path — bails
    * silently if the user switched operators mid-page-load.
@@ -373,13 +375,19 @@ export class ResultTableFrameComponent implements OnInit, OnChanges, OnDestroy {
         return;
       }
       if (pageIndex > lastPage) {
-        // Exhausted the search window. Silently fall back to the file-byte-order
-        // index — this is the same path locate took before fingerprints existed
-        // and is correct for single-worker output (the common case). For
-        // multi-worker shuffle cases the flash may land on the wrong cell, but
-        // toasting on every click is more annoying than the occasional miss is
-        // confusing; the toast was firing 100% of the time during normal use.
-        this.handleLocateByIndex(requestOperatorId, requestId, fallbackIndex, column);
+        // Exhausted the search window. We deliberately do NOT fall back to the
+        // file-byte-order index here — that path is correct only for single-
+        // worker output, and on multi-worker JSONL it silently lands on the
+        // wrong cell (worker-shuffle puts an unrelated row at the byte-order
+        // position). Earlier versions toasted on every click because the
+        // pre-`isCellMissing`-fingerprint contract mismatched 100% of the time
+        // for null cells; with the round-6 fingerprint normalisation in place
+        // a miss now only happens when the data genuinely no longer matches
+        // the scan (post-Apply drift, schema change, etc.) — surfacing that
+        // is exactly what we want. Emit `flashed: false`; the checklist
+        // caller decides whether to toast based on whether a `rowKey` was in
+        // the request.
+        this.reportFlashResult(requestId, false);
         return;
       }
       this.currentPageIndex = pageIndex;

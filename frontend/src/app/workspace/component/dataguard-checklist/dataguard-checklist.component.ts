@@ -388,6 +388,17 @@ export class DataGuardChecklistComponent implements OnInit, OnDestroy {
     });
     if (flashed) {
       this.locateCursors.set(entry.issueId, step.nextCursor);
+    } else if (rowKey !== undefined) {
+      // Walk exhausted with a fingerprint-based request: the scan's fingerprint
+      // doesn't match anything currently in the result panel. This happens
+      // when the dataset has drifted since the scan (e.g., the user re-ran
+      // the workflow after editing the file, or applied a fix that altered
+      // this column). Prior behaviour silently fell back to the file-byte-
+      // order index and lit up an unrelated row — strictly worse than no
+      // flash at all. Tell the user instead.
+      this.notificationService.info(
+        "DataGuard: couldn't find this row in the current result — the data may have changed since the scan. Try Scan again."
+      );
     }
   }
 
