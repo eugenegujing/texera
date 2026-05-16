@@ -382,6 +382,79 @@ describe("applyFix", () => {
     expect(result.dataset.rows[4].yn).toBe("unknown");
   });
 
+  test("standardize: identity mapping on already-canonical data → zero affected", () => {
+    // Iterative-cleanup regression mirroring the replace_value rowIndices
+    // no-op guard. On a JSONL already at v3 (twice-cleaned), the LLM can
+    // propose a mapping whose values equal the keys (e.g. {a: "a", b: "b"})
+    // for cells that are already canonical. Without the cellEquals skip,
+    // affected > 0 → frontend pushes a byte-identical CSV → LakeFS aborts
+    // the version commit with "No changes detected in dataset."
+    const ds: DatasetView = {
+      columns: ["region"],
+      rows: [{ region: "South" }, { region: "North" }, { region: "South" }],
+    };
+    const result = applyFix(
+      ds,
+      makeProposal({
+        operationKind: "standardize",
+        operationParams: {
+          column: "region",
+          mapping: { South: "South", North: "North" },
+        },
+      })
+    );
+    expect(result.rowsAffected).toBe(0);
+    expect(result.dataset.rows[0].region).toBe("South");
+    expect(result.dataset.rows[1].region).toBe("North");
+    expect(result.dataset.rows[2].region).toBe("South");
+  });
+
+  test("standardize: mixed dataset only counts genuine changes", () => {
+    // Mapping {south: "South"}, but the column already contains a row that
+    // is canonical "South". Only the two lowercase rows should count.
+    const ds: DatasetView = {
+      columns: ["region"],
+      rows: [{ region: "south" }, { region: "South" }, { region: "south" }],
+    };
+    const result = applyFix(
+      ds,
+      makeProposal({
+        operationKind: "standardize",
+        operationParams: {
+          column: "region",
+          mapping: { south: "South" },
+        },
+      })
+    );
+    expect(result.rowsAffected).toBe(2);
+    expect(result.dataset.rows[0].region).toBe("South");
+    expect(result.dataset.rows[1].region).toBe("South");
+    expect(result.dataset.rows[2].region).toBe("South");
+  });
+
+  test("standardize: cell not in mapping → untouched, not counted", () => {
+    // The cell "East" has no mapping entry, so it should pass through as-is
+    // and not contribute to rowsAffected.
+    const ds: DatasetView = {
+      columns: ["region"],
+      rows: [{ region: "south" }, { region: "East" }, { region: "south" }],
+    };
+    const result = applyFix(
+      ds,
+      makeProposal({
+        operationKind: "standardize",
+        operationParams: {
+          column: "region",
+          mapping: { south: "South" },
+        },
+      })
+    );
+    expect(result.rowsAffected).toBe(2);
+    expect(result.dataset.rows[0].region).toBe("South");
+    expect(result.dataset.rows[1].region).toBe("East");
+    expect(result.dataset.rows[2].region).toBe("South");
+  });
+
   test("rename_column: updates columns array and per-row keys", () => {
     const ds: DatasetView = {
       columns: ["sample_id", "value"],

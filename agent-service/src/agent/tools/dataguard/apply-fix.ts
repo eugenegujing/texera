@@ -136,11 +136,23 @@ export function applyFix(
       const column = params.column as string;
       const mapping = params.mapping as Record<string, string>;
       let affected = 0;
+      // No-op skip: only count a row as affected when mapping[v] actually
+      // differs from the current cell. Same iterative-convergence pain as
+      // replace_value above — on re-scans of an already-cleaned dataset the
+      // LLM can propose an identity mapping (e.g. {south: "South"} where every
+      // row already says "South", or even {south: "south"} when v3 still flags
+      // canonical-case values). Without this guard, every "match" writes a
+      // byte-identical cell but increments affected, the frontend pushes an
+      // unchanged CSV, and LakeFS rejects the version commit with
+      // "No changes detected in dataset."
       for (const r of rows) {
         const v = r[column];
         if (typeof v === "string" && Object.prototype.hasOwnProperty.call(mapping, v)) {
-          r[column] = mapping[v];
-          affected++;
+          const next = mapping[v];
+          if (!cellEquals(v, next)) {
+            r[column] = next;
+            affected++;
+          }
         }
       }
       return { dataset: { columns, rows }, rowsAffected: affected };
