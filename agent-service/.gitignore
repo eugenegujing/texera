@@ -1,0 +1,5 @@
+# Local-only demo datasets for DataGuard. Kept on disk for hand-testing the
+# auto-trigger flow against single-category CSVs, but not committed —
+# `agent-service/demo/diabetes_messy.csv` and its single-category siblings
+# can be re-generated or re-downloaded; they shouldn't live in upstream.
+demo/
