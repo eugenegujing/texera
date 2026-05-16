@@ -579,6 +579,38 @@ describe("profileDataset", () => {
       // patient_id: JSON.stringify(String("p-7")) = "\"p-7\""
       expect(key).toBe('"180"' + "null" + '"p-7"');
     });
+
+    // Round-6 regression — JSONL null-cell locate bug.
+    //
+    // Texera's `JSONLScanSourceOpExec` reads each line via Jackson and pipes
+    // it through `JSONUtils.JSONToMap`, which calls `JsonNode#asText()` on
+    // every value node. For a JsonNullNode, Jackson's `asText()` returns the
+    // literal STRING `"null"` (4 chars n-u-l-l), not Java null. So when the
+    // result panel renders a row that the source file had as `{score: null}`,
+    // the cell value the frontend sees is the string `"null"`, while the
+    // profiler-side parseJsonl preserved a real JS `null`.
+    //
+    // Pre-fix the profiler emitted bare `null` for the cell, the frontend
+    // emitted `"\"null\""` (the quoted form), the fingerprints diverged,
+    // `findRowByKey` missed every row, and the silent index-fallback path
+    // flashed whatever shuffled display row sat at the byte-order index.
+    //
+    // The fix collapses both representations to the bare `null` token via
+    // the shared `isMissing` predicate so the two sides agree.
+    test("regression: explicit-null cell and Jackson-asText `\"null\"` string fingerprint identically (JSONL round 6)", () => {
+      const profilerRow = { score: null as unknown, user: "Grace" };
+      const texeraRow = { score: "null", user: "Grace" };
+      const a = rowFingerprint(profilerRow, ["score", "user"]);
+      const b = rowFingerprint(texeraRow, ["score", "user"]);
+      expect(a).toBe(b);
+    });
+
+    test("regression: standard missing-token spellings all fingerprint to the bare null token", () => {
+      const expected = rowFingerprint({ x: null }, ["x"]);
+      for (const token of ["null", "NULL", "Null", "NA", "n/a", "N/A", "None", "NONE", "nan", "NaN", "", "  "]) {
+        expect(rowFingerprint({ x: token }, ["x"])).toBe(expected);
+      }
+    });
   });
 
   // ---------------------------------------------------------------------------

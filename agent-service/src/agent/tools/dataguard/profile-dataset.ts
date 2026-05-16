@@ -119,13 +119,24 @@ function maybeIndices(
  *     while DataGuard's own `parseJsonl` keeps native JSON types — without
  *     the coercion the two sides fingerprint differently and `findRowByKey`
  *     misses every row in mixed-type columns.
- *   - Null / undefined / missing keys emit the bare token `null` (no quotes).
+ *   - **Round 6 — missing-token canonicalization.** Any cell `isMissing()`
+ *     considers absent (`null`, `undefined`, `NaN`, `""`, and the
+ *     case-insensitive trimmed tokens `na`/`n/a`/`null`/`none`/`nan`) emits
+ *     the same bare `null` token. This closes a JSONL locate bug: Texera's
+ *     `JSONToMap` calls Jackson's `JsonNode#asText()` on a `NullNode`, which
+ *     returns the literal STRING `"null"` (not Java null). Without the
+ *     canonicalization the profiler-side null cell fingerprints as bare
+ *     `null` while the Texera-side cell fingerprints as `"\"null\""` and the
+ *     locate match silently misses, falling back to the byte-order index path
+ *     that lands on whatever shuffled display row happens to sit at that
+ *     position.
  *   - The individual JSON tokens are concatenated with an empty separator;
  *     because each token is self-delimited (`"…"` or the literal `null`),
  *     no ambiguity is introduced.
  *
  * Edge cases handled:
- *   - Missing key vs explicit null → identical fingerprint (`null`).
+ *   - Missing key vs explicit null vs the string `"null"` (Jackson asText on
+ *     a JsonNullNode) → identical fingerprint (`null`).
  *   - JSON-stringify special characters (quotes, backslashes, unicode) → the
  *     standard JSON.stringify escapes apply identically on V8 (Texera frontend)
  *     and on Bun (agent-service).
@@ -133,7 +144,7 @@ function maybeIndices(
  *     implement IEEE-754 ToString per ECMA-262 §7.1.17).
  */
 function fingerprintCell(v: unknown): string {
-  if (v === null || v === undefined) return "null";
+  if (isCellMissing(v)) return "null";
   return JSON.stringify(String(v));
 }
 

@@ -251,21 +251,64 @@ export class DataGuardRowNavigatorService {
   }
 
   /**
+   * Case-insensitive set of string tokens that mean "no value was recorded."
+   * MUST stay in sync with `MISSING_TOKENS_LOWER` in
+   * `agent-service/src/agent/tools/dataguard/missing-detection.ts`. We
+   * deliberately inline the set rather than import — frontend and
+   * agent-service are separate build targets with no shared module path —
+   * and the contract is enforced by parallel unit tests using the same
+   * fixtures (see the round-6 regression test for JSONL `null` cells).
+   */
+  private static readonly MISSING_TOKENS_LOWER: ReadonlySet<string> = new Set([
+    "na",
+    "n/a",
+    "null",
+    "none",
+    "nan",
+  ]);
+
+  /**
+   * Mirror of `isMissing` in agent-service `missing-detection.ts`. Treats
+   * `null`, `undefined`, `NaN`, empty / whitespace-only strings, and the
+   * case-insensitive trimmed missing-token set above as missing. Used by
+   * `fingerprintCell` so a profiler-side null cell and a Texera-side
+   * `"null"` string cell collapse to the same fingerprint token (see
+   * round-6 doc on `fingerprintCell` below).
+   */
+  private static isMissingCell(v: unknown): boolean {
+    if (v === null || v === undefined) return true;
+    if (typeof v === "number" && Number.isNaN(v)) return true;
+    if (typeof v !== "string") return false;
+    const trimmed = v.trim();
+    if (trimmed === "") return true;
+    return DataGuardRowNavigatorService.MISSING_TOKENS_LOWER.has(trimmed.toLowerCase());
+  }
+
+  /**
    * Compute the fingerprint of a result-panel row. Implementation MUST stay
    * byte-identical to the agent-service `rowFingerprint` helper, otherwise the
    * locate-by-key match will silently fail.
    *
    * Contract (mirrored from agent-service):
    *   - Canonicalize column order by alphabetical sort.
-   *   - Each non-null cell is normalised to a string via `String(v)` before
-   *     `JSON.stringify`, so number `45` and string `"45"` produce the same
-   *     token. This is the fix for the JSONL-multi-worker mixed-type case:
-   *     Texera's `JSONLScanSourceOpExec` widens mixed columns to String via
-   *     `parseField(stringValue, schemaType)`, while DataGuard's `parseJsonl`
-   *     keeps native JSON types. Without coercion the two sides fingerprint
-   *     differently and `findRowByKey` misses every row.
-   *   - `undefined` and missing keys emit the bare token `null` (no quotes),
-   *     identical to explicit-null cells.
+   *   - Each non-missing cell is normalised to a string via `String(v)`
+   *     before `JSON.stringify`, so number `45` and string `"45"` produce the
+   *     same token. This is the fix for the JSONL-multi-worker mixed-type
+   *     case: Texera's `JSONLScanSourceOpExec` widens mixed columns to String
+   *     via `parseField(stringValue, schemaType)`, while DataGuard's
+   *     `parseJsonl` keeps native JSON types. Without coercion the two sides
+   *     fingerprint differently and `findRowByKey` misses every row.
+   *   - **Round 6 — missing-token canonicalization.** Any cell `isMissingCell`
+   *     considers absent (`null`, `undefined`, `NaN`, `""`/whitespace, and
+   *     the case-insensitive trimmed tokens `na`/`n/a`/`null`/`none`/`nan`)
+   *     emits the same bare `null` token. This closes the JSONL locate bug
+   *     where Texera's `JSONToMap` calls Jackson's `JsonNode#asText()` on a
+   *     `NullNode`, returning the literal STRING `"null"` rather than Java
+   *     null — without canonicalization the profiler-side cell fingerprints
+   *     as bare `null` while the Texera-side cell fingerprints as
+   *     `"\"null\""`, the locate match silently misses, and the byte-order
+   *     index fallback lands on whatever shuffled display row happens to sit
+   *     at that position.
    *   - Concatenate JSON tokens with an empty separator (each token is
    *     self-delimited as `"…"` or the literal `null`).
    *
@@ -275,7 +318,7 @@ export class DataGuardRowNavigatorService {
    * each side using the same input fixtures.
    */
   private static fingerprintCell(v: unknown): string {
-    if (v === null || v === undefined) return "null";
+    if (DataGuardRowNavigatorService.isMissingCell(v)) return "null";
     return JSON.stringify(String(v));
   }
 

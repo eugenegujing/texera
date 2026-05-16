@@ -219,6 +219,55 @@ describe("DataGuardRowNavigatorService", () => {
       expect(a).toBe(b);
       expect(a).toBe('"28.1"');
     });
+
+    // Round-6 regression — JSONL null-cell locate bug.
+    //
+    // Texera's JSONLScanSourceOpExec pipes each row through JSONUtils.JSONToMap,
+    // which calls Jackson's JsonNode#asText() on every value node. For a
+    // JsonNullNode that returns the literal STRING `"null"` (4 chars n-u-l-l),
+    // not Java null. So the result-panel row for a source `{score: null}` line
+    // arrives at the frontend as `{score: "null"}` (string), while the
+    // profiler-side parseJsonl preserved a real JS `null`.
+    //
+    // Pre-fix the two sides fingerprinted differently — bare `null` vs.
+    // `"\"null\""` — findRowByKey returned -1 for every affected row, and the
+    // silent byte-order index fallback flashed whatever shuffled display row
+    // sat at the source-byte position (e.g. a non-null row on a later page).
+    //
+    // The fix routes any cell that satisfies `isMissingCell` (null / undefined
+    // / NaN / "" / whitespace / `na` / `n/a` / `null` / `none` / `nan`,
+    // case-insensitive) through the same bare `null` token on both sides.
+    it("regression: explicit-null cell and Jackson-asText `\"null\"` string fingerprint identically (JSONL round 6)", () => {
+      const profilerRow = { score: null, user: "Grace" };
+      const texeraRow = { score: "null", user: "Grace" };
+      const a = DataGuardRowNavigatorService.rowFingerprint(profilerRow, ["score", "user"]);
+      const b = DataGuardRowNavigatorService.rowFingerprint(texeraRow, ["score", "user"]);
+      expect(a).toBe(b);
+    });
+
+    it("regression: standard missing-token spellings all fingerprint to the bare null token", () => {
+      const expected = DataGuardRowNavigatorService.rowFingerprint({ x: null }, ["x"]);
+      for (const token of ["null", "NULL", "Null", "NA", "n/a", "N/A", "None", "NONE", "nan", "NaN", "", "  "]) {
+        expect(DataGuardRowNavigatorService.rowFingerprint({ x: token }, ["x"])).toBe(expected);
+      }
+    });
+
+    // Roundtrip integration: the profiler emits a row-key for a null cell,
+    // then the result-panel renders the same row with the Texera-coerced
+    // string `"null"`. `findRowByKey` MUST locate it.
+    it("regression: findRowByKey locates a Texera-coerced null row using the profiler's row-key (round 6)", () => {
+      const profilerRow = { region: "East", score: null, "user.id": "U007", "user.name": "Grace" };
+      const columns = ["region", "score", "user.id", "user.name"];
+      const profilerKey = DataGuardRowNavigatorService.rowFingerprint(profilerRow, columns);
+      // Texera-side display rows: Jackson coerces null → "null", and the
+      // multi-worker scan may have shuffled this row to position 2.
+      const displayRows = [
+        { region: "north", score: "88", "user.id": "U037", "user.name": "Kai" },
+        { region: "south", score: "72", "user.id": "U012", "user.name": "Ivy" },
+        { region: "East", score: "null", "user.id": "U007", "user.name": "Grace" },
+      ];
+      expect(DataGuardRowNavigatorService.findRowByKey(displayRows, columns, profilerKey)).toBe(2);
+    });
   });
 
   describe("findRowByKey", () => {
