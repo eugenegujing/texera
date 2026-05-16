@@ -394,59 +394,7 @@ src/app/workspace/
 
 ---
 
-## 14. Setup
-
-DataGuard runs as part of the standard Texera microservices + agent-service stack, plus a local LiteLLM proxy that wraps an LLM provider with an OpenAI-compatible API.
-
-### 14.1 One-time setup
-
-```bash
-# 1) API key for your LLM provider (e.g., Anthropic) — exported once
-echo 'export ANTHROPIC_API_KEY=sk-ant-…your-key…' >> ~/.zshrc
-source ~/.zshrc
-
-# 2) Python venv for LiteLLM proxy
-python3.12 -m venv ~/UCI/TexeraProject/venv312
-~/UCI/TexeraProject/venv312/bin/pip install --upgrade pip
-~/UCI/TexeraProject/venv312/bin/pip install 'litellm[proxy]'
-
-# 3) Bun for agent-service
-brew install oven-sh/bun/bun
-
-# 4) Yarn 4 via Corepack for frontend
-corepack enable
-
-# 5) GUI feature flag in Texera config
-# Set: common/config/src/main/resources/gui.conf
-#   copilot-enabled = true
-```
-
-### 14.2 Daily startup
-
-```bash
-# Terminal 1 — LiteLLM proxy on :4000 (OpenAI-style API over your provider)
-source ~/UCI/TexeraProject/venv312/bin/activate
-cd ~/UCI/TexeraProject/texera
-litellm --config bin/litellm-config.yaml
-
-# Terminal 2 — Texera Scala microservices
-# IntelliJ "texera micro services" run config, or:
-# bin/single-node/docker compose up -d
-
-# Terminal 3 — agent-service
-cd ~/UCI/TexeraProject/texera/agent-service
-bun install   # only if node_modules absent
-bun run dev   # :3001 with --watch reload
-
-# Terminal 4 — Frontend
-cd ~/UCI/TexeraProject/texera/frontend
-yarn install  # only if node_modules absent
-yarn start    # :4200, proxies /api/* per proxy.config.json
-```
-
-Then open `http://localhost:4200`, sign in, open or create a workflow.
-
-### 14.3 End-to-end flow
+## 14. End-to-end flow
 
 1. Confirm the 🛡 shield is ON (toolbar — twotone icon = ON, outline = OFF).
 2. Drop a `CSVFileScan` operator and point it at any dataset in the system.
