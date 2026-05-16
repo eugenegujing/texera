@@ -252,6 +252,69 @@ describe("DataGuardRowNavigatorService", () => {
     });
   });
 
+  describe("findNthRowByKey", () => {
+    // Regression: duplicate-row issues emit N identical fingerprints in
+    // affectedRowKeys (every dup row has the same content by definition).
+    // findRowByKey returns the first display match for every click, so 4
+    // dup clicks would collapse to 2 visible flashes if we did not cycle by
+    // occurrence. findNthRowByKey returns the Nth match so the checklist can
+    // hand a different occurrence to each click and land on a distinct row.
+    const dupRows = [
+      { id: "X", group: "g1" }, // 0: unrelated
+      { id: "J001", group: "g1" }, // 1: dup A, first match
+      { id: "Y", group: "g2" }, // 2: unrelated
+      { id: "J001", group: "g1" }, // 3: dup A, second match
+    ];
+    const columns = ["id", "group"];
+
+    it("returns the index of the Nth match (0-indexed) and -1 once exhausted", () => {
+      const dupKey = DataGuardRowNavigatorService.rowFingerprint({ id: "J001", group: "g1" }, columns);
+      expect(DataGuardRowNavigatorService.findNthRowByKey(dupRows, columns, dupKey, 0)).toBe(1);
+      expect(DataGuardRowNavigatorService.findNthRowByKey(dupRows, columns, dupKey, 1)).toBe(3);
+      expect(DataGuardRowNavigatorService.findNthRowByKey(dupRows, columns, dupKey, 2)).toBe(-1);
+    });
+
+    it("returns -1 on empty inputs / no matches", () => {
+      const dupKey = DataGuardRowNavigatorService.rowFingerprint({ id: "J001", group: "g1" }, columns);
+      expect(DataGuardRowNavigatorService.findNthRowByKey([], columns, dupKey, 0)).toBe(-1);
+      expect(DataGuardRowNavigatorService.findNthRowByKey(dupRows, [], dupKey, 0)).toBe(-1);
+      const missing = DataGuardRowNavigatorService.rowFingerprint({ id: "ZZZ", group: "g9" }, columns);
+      expect(DataGuardRowNavigatorService.findNthRowByKey(dupRows, columns, missing, 0)).toBe(-1);
+    });
+
+    it("coerces negative / non-finite occurrence to 0 (defensive)", () => {
+      const dupKey = DataGuardRowNavigatorService.rowFingerprint({ id: "J001", group: "g1" }, columns);
+      expect(DataGuardRowNavigatorService.findNthRowByKey(dupRows, columns, dupKey, -1)).toBe(1);
+      expect(DataGuardRowNavigatorService.findNthRowByKey(dupRows, columns, dupKey, NaN)).toBe(1);
+    });
+
+    it("findRowByKey is a thin wrapper over findNthRowByKey(..., 0)", () => {
+      const dupKey = DataGuardRowNavigatorService.rowFingerprint({ id: "J001", group: "g1" }, columns);
+      expect(DataGuardRowNavigatorService.findRowByKey(dupRows, columns, dupKey)).toBe(
+        DataGuardRowNavigatorService.findNthRowByKey(dupRows, columns, dupKey, 0)
+      );
+    });
+  });
+
+  describe("countMatchesByKey", () => {
+    it("counts every row whose fingerprint matches the key", () => {
+      const rows = [
+        { id: "J001", v: 1 },
+        { id: "J002", v: 2 },
+        { id: "J001", v: 1 },
+        { id: "J001", v: 1 },
+      ];
+      const columns = ["id", "v"];
+      const key = DataGuardRowNavigatorService.rowFingerprint({ id: "J001", v: 1 }, columns);
+      expect(DataGuardRowNavigatorService.countMatchesByKey(rows, columns, key)).toBe(3);
+    });
+
+    it("returns 0 on empty inputs / no match", () => {
+      expect(DataGuardRowNavigatorService.countMatchesByKey([], ["id"], "x")).toBe(0);
+      expect(DataGuardRowNavigatorService.countMatchesByKey([{ id: "a" }], [], "x")).toBe(0);
+    });
+  });
+
   describe("navigate / getNav$", () => {
     it("multicasts the request to nav$ subscribers, stamping a requestId, and resolves Promise<boolean>", async () => {
       const svc = new DataGuardRowNavigatorService();

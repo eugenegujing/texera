@@ -73,6 +73,27 @@ export interface DataGuardRowNavRequest {
   rowKey?: string;
   /** Optional column to focus / highlight inside the row. */
   column?: string;
+  /**
+   * For duplicate-row issues every affected row has IDENTICAL content, so all
+   * entries of `affectedRowKeys` point to the SAME fingerprint string. A naive
+   * `findRowByKey` would return the first matching display row on every click,
+   * collapsing 4 dup clicks into 2 visible flashes. This field lets the caller
+   * say "I want the Nth display match of this fingerprint" — the checklist
+   * counts how many times the current key appeared earlier in the cursor walk
+   * and passes that as the occurrence so each click lands on a distinct row.
+   *
+   * 0-indexed (0 = first display match, 1 = second, …). Defaults to 0 when
+   * omitted, preserving the pre-existing single-match semantics for unique
+   * fingerprints (the common case — missing values, placeholders, outliers,
+   * inconsistent labels are all per-row unique keys).
+   *
+   * Crucially, the result-table-frame's page walk treats this occurrence
+   * **cumulatively across pages**: if page 1 has 1 match and the user wanted
+   * occurrence=1, the walker advances past page 1 and looks for the first
+   * match on subsequent pages — it does NOT pick the first match on page 2.
+   * See `handleLocateByKey` for the matchesSeenBeforeCurrentPage accumulator.
+   */
+  rowKeyOccurrence?: number;
 }
 
 /**
@@ -268,23 +289,67 @@ export class DataGuardRowNavigatorService {
   }
 
   /**
-   * Linear-scan find of the row whose fingerprint matches `targetKey`. Returns
-   * the 0-based display index, or -1 if no row matches.
+   * Linear-scan find of the **Nth** row whose fingerprint matches `targetKey`.
+   * Returns the 0-based display index of the `occurrence`-th match (0 = first,
+   * 1 = second, …) or -1 if there are fewer matches than requested.
    *
-   * `columns` is the schema seen by the caller (display-side); it can be in any
-   * order — the fingerprint canonicalises it. Empty arrays return -1.
+   * Duplicate-row issues are why this exists. Every affected row in a
+   * `duplicate_id` issue has the SAME fingerprint by definition, so the
+   * checklist's cursor walk hands the same `targetKey` to every click and
+   * relies on `occurrence` to walk distinct display rows.
+   *
+   * `columns` is the schema seen by the caller (display-side); it can be in
+   * any order — the fingerprint canonicalises it. Empty arrays return -1.
+   * Negative or non-finite `occurrence` is coerced to 0 (defensive).
+   */
+  public static findNthRowByKey(
+    rows: ReadonlyArray<Record<string, unknown>>,
+    columns: ReadonlyArray<string>,
+    targetKey: string,
+    occurrence: number
+  ): number {
+    if (rows.length === 0 || columns.length === 0) return -1;
+    const want = Number.isFinite(occurrence) && occurrence >= 0 ? Math.floor(occurrence) : 0;
+    let seen = 0;
+    for (let i = 0; i < rows.length; i++) {
+      if (DataGuardRowNavigatorService.rowFingerprint(rows[i], columns) === targetKey) {
+        if (seen === want) return i;
+        seen++;
+      }
+    }
+    return -1;
+  }
+
+  /**
+   * Thin wrapper preserving the pre-occurrence call sites (and tests). Returns
+   * the first display-row index whose fingerprint matches `targetKey`, or -1.
    */
   public static findRowByKey(
     rows: ReadonlyArray<Record<string, unknown>>,
     columns: ReadonlyArray<string>,
     targetKey: string
   ): number {
-    if (rows.length === 0 || columns.length === 0) return -1;
+    return DataGuardRowNavigatorService.findNthRowByKey(rows, columns, targetKey, 0);
+  }
+
+  /**
+   * Count how many rows on the supplied page match `targetKey`. Used by the
+   * result-table-frame's page walker to maintain a cumulative "matches seen
+   * before the current page" counter so an `occurrence` request lands on the
+   * correct display row even when matches straddle a page boundary.
+   */
+  public static countMatchesByKey(
+    rows: ReadonlyArray<Record<string, unknown>>,
+    columns: ReadonlyArray<string>,
+    targetKey: string
+  ): number {
+    if (rows.length === 0 || columns.length === 0) return 0;
+    let count = 0;
     for (let i = 0; i < rows.length; i++) {
       if (DataGuardRowNavigatorService.rowFingerprint(rows[i], columns) === targetKey) {
-        return i;
+        count++;
       }
     }
-    return -1;
+    return count;
   }
 }

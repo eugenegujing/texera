@@ -260,7 +260,14 @@ export class ResultTableFrameComponent implements OnInit, OnChanges, OnDestroy {
         // (handles Texera's JSONL multi-worker row-shuffle). Fall back to the
         // raw index path when rowKey is absent or no row matches anywhere.
         if (req.rowKey !== undefined) {
-          this.handleLocateByKey(req.operatorId, req.requestId, req.rowKey, req.column, req.rowIndex);
+          this.handleLocateByKey(
+            req.operatorId,
+            req.requestId,
+            req.rowKey,
+            req.column,
+            req.rowIndex,
+            req.rowKeyOccurrence ?? 0
+          );
         } else {
           this.handleLocateByIndex(req.operatorId, req.requestId, req.rowIndex, req.column);
         }
@@ -291,7 +298,8 @@ export class ResultTableFrameComponent implements OnInit, OnChanges, OnDestroy {
     requestId: number,
     rowKey: string,
     column: string | undefined,
-    fallbackIndex: number
+    fallbackIndex: number,
+    occurrence: number
   ): void {
     // Every async resumption MUST first check that our captured requestId is
     // still the current one. If a newer click superseded us, emit
@@ -299,26 +307,52 @@ export class ResultTableFrameComponent implements OnInit, OnChanges, OnDestroy {
     // Returns `true` when the caller should bail.
     const isSuperseded = (): boolean => this.currentLocateToken !== requestId;
 
-    const tryFlashOnCurrentPage = (): boolean => {
-      if (this.operatorId !== requestOperatorId) return true; // bail, but treat as "handled"
+    // Cumulative count of matches we've already walked past in earlier pages.
+    // The `occurrence` semantic is global (across the full result set), so the
+    // per-page lookup is `findNthRowByKey(...,occurrence - matchesSeenBeforeCurrentPage)`.
+    // When that returns -1, the page has K matches but they're earlier
+    // occurrences than the one we want — we advance the counter by K and move
+    // to the next page. This is critical for the duplicate-row case where the
+    // 4 dup rows can land on any 4 of the result-panel's display rows
+    // (potentially split across multiple pages by Texera's parallel scan).
+    let matchesSeenBeforeCurrentPage = 0;
+
+    const tryFlashOnCurrentPage = (): { flashed: boolean; matchesOnThisPage: number } => {
+      if (this.operatorId !== requestOperatorId) {
+        // bail, but treat as "handled" — return matchesOnThisPage=0 so the
+        // caller doesn't bump the cumulative counter on a stale frame.
+        return { flashed: true, matchesOnThisPage: 0 };
+      }
       const columns = this.currentColumns?.map(c => c.columnDef) ?? [];
-      const rowInPage = DataGuardRowNavigatorService.findRowByKey(
-        this.currentResult as ReadonlyArray<Record<string, unknown>>,
-        columns,
-        rowKey
-      );
+      const rows = this.currentResult as ReadonlyArray<Record<string, unknown>>;
+      const wantWithinPage = occurrence - matchesSeenBeforeCurrentPage;
+      const rowInPage = DataGuardRowNavigatorService.findNthRowByKey(rows, columns, rowKey, wantWithinPage);
       if (rowInPage >= 0) {
         this.flashRow(rowInPage, column);
-        return true;
+        return { flashed: true, matchesOnThisPage: 0 };
       }
-      return false;
+      // No match (or not enough matches) on this page: tally how many matches
+      // ARE on this page so the walker can advance the cumulative counter.
+      const matchesOnThisPage = DataGuardRowNavigatorService.countMatchesByKey(rows, columns, rowKey);
+      return { flashed: false, matchesOnThisPage };
     };
 
-    // 1. Fast path — match on the page already rendered.
-    if (tryFlashOnCurrentPage()) {
-      this.reportFlashResult(requestId, true);
-      return;
+    // 1. Fast path — only safe for `occurrence === 0` (the pre-occurrence
+    //    behaviour). When occurrence > 0 we can't trust a fast-path match on
+    //    the current page: the user may be on page 5 of 10 and the first
+    //    match here might be the 2nd or 3rd global occurrence, not the 1st.
+    //    Force the slow walk so the canonical page order is honoured.
+    if (occurrence === 0) {
+      const fast = tryFlashOnCurrentPage();
+      if (fast.flashed) {
+        this.reportFlashResult(requestId, true);
+        return;
+      }
     }
+    // The slow walk below starts from page 1 unconditionally and counts
+    // matches in canonical page order via matchesSeenBeforeCurrentPage, so it
+    // gives a deterministic answer regardless of which page is currently
+    // displayed.
 
     // 2. Walk subsequent pages. Start from page 1 (not currentPageIndex+1)
     //    because the user may not be on page 1 when they click — the affected
@@ -362,10 +396,12 @@ export class ResultTableFrameComponent implements OnInit, OnChanges, OnDestroy {
             this.reportFlashResult(requestId, false);
             return;
           }
-          if (tryFlashOnCurrentPage()) {
+          const attempt = tryFlashOnCurrentPage();
+          if (attempt.flashed) {
             this.reportFlashResult(requestId, true);
             return;
           }
+          matchesSeenBeforeCurrentPage += attempt.matchesOnThisPage;
           walkPage(pageIndex + 1);
         });
       this.changePaginatedResultData();

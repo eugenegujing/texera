@@ -349,9 +349,23 @@ export class DataGuardChecklistComponent implements OnInit, OnDestroy {
     // back to the index when `rowKey` cannot be found in the loaded data.
     const rowKeys = entry.issue.affectedRowKeys;
     let rowKey: string | undefined;
+    // For duplicate-row issues, every affected row has the SAME fingerprint
+    // — so all entries of rowKeys are byte-identical strings. We compute how
+    // many times the target key appeared earlier in the cursor walk and pass
+    // that to the table-frame as `rowKeyOccurrence` so each click can land on
+    // a distinct display row. Unique-key issues (the common case) keep
+    // occurrence=0 because the same key never appears twice. Counting against
+    // [0..cursor) (cursor itself exclusive) means click #1 = 0 occurrences
+    // seen, click #2 of the SAME key = 1, click #3 = 2, etc. — exactly the
+    // semantics findNthRowByKey expects.
+    let rowKeyOccurrence = 0;
     if (rowKeys && rowKeys.length === rowIndices.length) {
       const safeCursor = Number.isFinite(cursor) && cursor >= 0 ? Math.floor(cursor) : 0;
-      rowKey = rowKeys[safeCursor % rowKeys.length];
+      const idx = safeCursor % rowKeys.length;
+      rowKey = rowKeys[idx];
+      for (let i = 0; i < idx; i++) {
+        if (rowKeys[i] === rowKey) rowKeyOccurrence++;
+      }
     } else if (rowKeys === undefined) {
       // Server omitted fingerprints (e.g., issue was too large to enumerate).
       // Surface a hint so users aren't surprised when the highlight lands on
@@ -369,6 +383,7 @@ export class DataGuardChecklistComponent implements OnInit, OnDestroy {
       operatorId: opId,
       rowIndex: step.value,
       rowKey,
+      rowKeyOccurrence,
       column: entry.issue.column,
     });
     if (flashed) {

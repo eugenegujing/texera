@@ -62,12 +62,21 @@ export function applyFix(
       // slightly off (e.g. 950 vs 950.0 vs "950") — that turned every outlier
       // proposal into a byte-identical re-export, which then made LakeFS abort
       // the version commit with "No changes detected in dataset".
+      //
+      // Critically, we only count a row as "affected" when the replacement
+      // actually changes the cell. This matters for iterative cleanup: after
+      // v1→v2→v3 of capping outliers to the IQR fence, the proposal "replace
+      // these 3 rows with fence value X" hits cells that are *already* X.
+      // Without the equality guard, `applied` would be > 0, the frontend would
+      // try to write back a byte-identical CSV, and LakeFS would reject the
+      // commit with "No changes detected." With the guard, applied === 0,
+      // the frontend skips the upload, and the user sees "Nothing to apply."
       const targetIndices = params.rowIndices as number[] | undefined;
       let affected = 0;
       if (targetIndices && targetIndices.length > 0) {
         const indexSet = new Set(targetIndices);
         for (let i = 0; i < rows.length; i++) {
-          if (indexSet.has(i)) {
+          if (indexSet.has(i) && !cellEquals(rows[i][column], replacement)) {
             rows[i][column] = replacement;
             affected++;
           }
@@ -75,7 +84,7 @@ export function applyFix(
       } else {
         const match = params.match;
         for (const r of rows) {
-          if (cellEquals(r[column], match)) {
+          if (cellEquals(r[column], match) && !cellEquals(r[column], replacement)) {
             r[column] = replacement;
             affected++;
           }

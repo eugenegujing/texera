@@ -105,6 +105,58 @@ describe("applyFix", () => {
     expect(result.dataset.rows[1].x).toBe(2);
   });
 
+  test("replace_value with rowIndices skips no-op writes (cell already equals replacement)", () => {
+    // Iterative cleanup regression: after v1→v2→v3 capping outliers to the
+    // IQR fence, the LLM proposes "replace these rows with fence value X"
+    // but those rows already hold X from the previous round. Without the
+    // equality guard, rowsAffected would be 3, the frontend would push a
+    // byte-identical CSV, and LakeFS would abort with "No changes detected."
+    // With the guard, rowsAffected === 0 → frontend skips the upload.
+    const ds: DatasetView = {
+      columns: ["bmi"],
+      rows: [
+        { bmi: 28.1 },
+        { bmi: 35.74 }, // already at fence
+        { bmi: 27.5 },
+        { bmi: 35.74 }, // already at fence
+        { bmi: 35.74 }, // already at fence
+      ],
+    };
+    const result = applyFix(
+      ds,
+      makeProposal({
+        operationKind: "replace_value",
+        operationParams: { column: "bmi", rowIndices: [1, 3, 4], replacement: 35.74 },
+      })
+    );
+    expect(result.rowsAffected).toBe(0);
+    expect(result.dataset.rows[1].bmi).toBe(35.74);
+    expect(result.dataset.rows[3].bmi).toBe(35.74);
+  });
+
+  test("replace_value with rowIndices: mixed (some cells already match, some don't)", () => {
+    // Same scenario but row 3 still has a genuine outlier (75.2). Only that
+    // row should count as affected; the others are already at the fence.
+    const ds: DatasetView = {
+      columns: ["bmi"],
+      rows: [
+        { bmi: 35.74 },
+        { bmi: 35.74 },
+        { bmi: 35.74 },
+        { bmi: 75.2 }, // real outlier
+      ],
+    };
+    const result = applyFix(
+      ds,
+      makeProposal({
+        operationKind: "replace_value",
+        operationParams: { column: "bmi", rowIndices: [0, 1, 2, 3], replacement: 35.74 },
+      })
+    );
+    expect(result.rowsAffected).toBe(1);
+    expect(result.dataset.rows[3].bmi).toBe(35.74);
+  });
+
   test("replace_value: original dataset is not mutated", () => {
     const ds: DatasetView = {
       columns: ["age"],

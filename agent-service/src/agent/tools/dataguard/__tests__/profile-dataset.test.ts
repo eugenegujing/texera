@@ -287,11 +287,123 @@ describe("profileDataset", () => {
     expect(kinds.has("outlier")).toBe(true);
   });
 
-  describe("outlier detector (validRanges-based)", () => {
-    test("does not fire without validRanges hint — earlier z-score variant was removed", () => {
-      // 19 values near 50, one extreme reading at 500. The old z-score
-      // detector would have flagged the 500 automatically; the validRanges
-      // detector requires the caller to opt in by supplying a hard range.
+  describe("outlier detector (IQR auto + validRanges override)", () => {
+    // Auto-IQR is off by default (see ProfileOptions.enableOutlierDetection
+    // doc-comment for why). Tests that exercise the IQR branch opt in
+    // explicitly with `enableOutlierDetection: true` so the same coverage
+    // survives a future re-enable: flip the default and these tests stop
+    // needing the override.
+
+    test("auto-fires on a clear outlier via IQR (Tukey 1.5× fence) — no hint needed", () => {
+      // 19 values near 50, one extreme reading at 500. IQR Q1/Q3 are
+      // unaffected by the single outlier, so the fence excludes 500.
+      const rows: Array<Record<string, unknown>> = [];
+      for (let i = 0; i < 19; i++) rows.push({ v: 50 + (i % 3) });
+      rows.push({ v: 500 });
+      const issues = profileDataset({ columns: ["v"], rows }, { enableOutlierDetection: true });
+      const outlier = issues.find(i => i.issueType === "outlier" && i.column === "v");
+      expect(outlier).toBeDefined();
+      expect(outlier!.affectedRowIndices).toEqual([19]);
+      expect(outlier!.description).toContain("Tukey");
+    });
+
+    test("does NOT flag clusters of consecutive large readings — IQR Q3 absorbs them", () => {
+      // 10 normals at 100 + 10 sustained-high at 400. Q1=100, Q3=400, IQR=300,
+      // upper fence = 400 + 450 = 850. All values fit, no outliers.
+      // This is exactly the false-positive case the user wanted protection from.
+      const rows: Array<Record<string, unknown>> = [];
+      for (let i = 0; i < 10; i++) rows.push({ glucose: 100 });
+      for (let i = 0; i < 10; i++) rows.push({ glucose: 400 });
+      const issues = profileDataset({ columns: ["glucose"], rows }, { enableOutlierDetection: true });
+      expect(issues.find(i => i.issueType === "outlier")).toBeUndefined();
+    });
+
+    test("validRanges override wins per-column over auto IQR", () => {
+      // age column gets a hard range; bmi column has no range so falls back
+      // to IQR. The 500 in age should be flagged via validRanges (not IQR
+      // semantics).
+      const rows: Array<Record<string, unknown>> = [];
+      for (let i = 0; i < 19; i++) rows.push({ age: 30 + (i % 5), bmi: 25 + (i % 3) });
+      rows.push({ age: 500, bmi: 27 });
+      const issues = profileDataset(
+        { columns: ["age", "bmi"], rows },
+        { enableOutlierDetection: true, validRanges: { age: { min: 0, max: 120 } } }
+      );
+      const ageOutlier = issues.find(i => i.issueType === "outlier" && i.column === "age");
+      expect(ageOutlier).toBeDefined();
+      expect(ageOutlier!.affectedRowIndices).toEqual([19]);
+      expect(ageOutlier!.description).toContain("valid range");
+      // bmi column has no validRanges; IQR sees a tight cluster, no outlier.
+      expect(issues.find(i => i.issueType === "outlier" && i.column === "bmi")).toBeUndefined();
+    });
+
+    test("skips column with fewer than outlierMinObservations numeric values", () => {
+      // Quartiles aren't meaningful on a tiny sample, so the auto-IQR branch
+      // bails. Default min-obs is 10; we feed 5.
+      const rows: Array<Record<string, unknown>> = [
+        { v: 1 }, { v: 2 }, { v: 3 }, { v: 4 }, { v: 1000 },
+      ];
+      const issues = profileDataset({ columns: ["v"], rows }, { enableOutlierDetection: true });
+      expect(issues.find(i => i.issueType === "outlier")).toBeUndefined();
+    });
+
+    test("skips placeholder rows so they don't surface under two issue types", () => {
+      // age=999 is a default placeholder, so the placeholder detector owns
+      // that row. The IQR pass must skip it.
+      const rows: Array<Record<string, unknown>> = [];
+      for (let i = 0; i < 19; i++) rows.push({ age: 30 + (i % 5) });
+      rows.push({ age: 999 }); // placeholder, not outlier
+      const issues = profileDataset({ columns: ["age"], rows }, { enableOutlierDetection: true });
+      expect(issues.find(i => i.issueType === "placeholder_value")).toBeDefined();
+      expect(issues.find(i => i.issueType === "outlier")).toBeUndefined();
+    });
+
+    test("skips mostly-non-numeric columns (require ≥ 80% numeric)", () => {
+      // 18 strings + 2 numbers → 10% numeric → skip; otherwise the 2 numbers
+      // would form a degenerate quartile distribution and flag spuriously.
+      const rows: Array<Record<string, unknown>> = [];
+      for (let i = 0; i < 18; i++) rows.push({ mixed: "label-" + i });
+      rows.push({ mixed: 5 });
+      rows.push({ mixed: 9999 });
+      const issues = profileDataset({ columns: ["mixed"], rows }, { enableOutlierDetection: true });
+      expect(issues.find(i => i.issueType === "outlier" && i.column === "mixed")).toBeUndefined();
+    });
+
+    test("custom outlierIqrMultiplier bumps the fence to suppress mild outliers", () => {
+      // With default 1.5×, value 500 is flagged. Bumping high enough that the
+      // fence comfortably covers 500 → no outlier. Q1=50, Q3=52, IQR=2,
+      // multiplier 1000 → fence = 52 + 2000 = 2052, so 500 fits. Useful for
+      // users who want IQR off entirely without supplying validRanges.
+      const rows: Array<Record<string, unknown>> = [];
+      for (let i = 0; i < 19; i++) rows.push({ v: 50 + (i % 3) });
+      rows.push({ v: 500 });
+      const issues = profileDataset(
+        { columns: ["v"], rows },
+        { enableOutlierDetection: true, outlierIqrMultiplier: 1000 }
+      );
+      expect(issues.find(i => i.issueType === "outlier")).toBeUndefined();
+    });
+
+    test("does not double-count: IQR skips column when validRanges already set", () => {
+      // Mode-1 is exclusive per column: a column with validRanges goes through
+      // the hard-range path only — IQR is silently bypassed for that column.
+      const rows: Array<Record<string, unknown>> = [];
+      for (let i = 0; i < 19; i++) rows.push({ age: 30 + (i % 5) });
+      rows.push({ age: 500 });
+      const issues = profileDataset(
+        { columns: ["age"], rows },
+        { enableOutlierDetection: true, validRanges: { age: { min: 0, max: 120 } } }
+      );
+      // Exactly one outlier issue for age, not two.
+      const ageOutliers = issues.filter(i => i.issueType === "outlier" && i.column === "age");
+      expect(ageOutliers).toHaveLength(1);
+    });
+
+    // -------- Default-off coverage (Part 1 of the round-5 patch) --------
+
+    test("auto-IQR is OFF by default — same input that would flag with the option is silent", () => {
+      // Same 19+1=500 fixture as the "auto-fires" test above, but without the
+      // `enableOutlierDetection: true` option. Locks the default to false.
       const rows: Array<Record<string, unknown>> = [];
       for (let i = 0; i < 19; i++) rows.push({ v: 50 + (i % 3) });
       rows.push({ v: 500 });
@@ -299,29 +411,19 @@ describe("profileDataset", () => {
       expect(issues.find(i => i.issueType === "outlier")).toBeUndefined();
     });
 
-    test("flags values outside the user-supplied range", () => {
-      const rows: Array<Record<string, unknown>> = [];
-      for (let i = 0; i < 19; i++) rows.push({ age: 30 + (i % 5) });
-      rows.push({ age: 500 });
-      const issues = profileDataset(
-        { columns: ["age"], rows },
-        { validRanges: { age: { min: 0, max: 120 } } }
-      );
-      const outlier = issues.find(i => i.issueType === "outlier" && i.column === "age");
+    test("validRanges still fires when enableOutlierDetection is false (explicit override)", () => {
+      // Per spec: a caller who explicitly supplied validRanges shouldn't be
+      // surprised by the new gating. The validRange-based mode runs even with
+      // auto-IQR off. Only the auto branch is gated.
+      const ds: DatasetView = {
+        columns: ["bmi"],
+        rows: [{ bmi: 25 }, { bmi: 75 }, { bmi: 30 }, { bmi: 100 }],
+      };
+      const issues = profileDataset(ds, { validRanges: { bmi: { min: 10, max: 60 } } });
+      const outlier = issues.find(i => i.issueType === "outlier" && i.column === "bmi");
       expect(outlier).toBeDefined();
-      expect(outlier!.affectedRowCount).toBe(1);
-      expect(outlier!.affectedRowIndices).toEqual([19]);
-    });
-
-    test("does NOT flag clusters of consecutive large readings — the whole point of the redesign", () => {
-      // The earlier z-score detector would have flagged half of this column.
-      // We deliberately don't: the user owns the definition of "out of range",
-      // and unless they say so, clustered extremes are real data.
-      const rows: Array<Record<string, unknown>> = [];
-      for (let i = 0; i < 10; i++) rows.push({ glucose: 100 });
-      for (let i = 0; i < 10; i++) rows.push({ glucose: 400 }); // sustained high
-      const issues = profileDataset({ columns: ["glucose"], rows });
-      expect(issues.find(i => i.issueType === "outlier")).toBeUndefined();
+      expect(outlier!.affectedRowCount).toBe(2);
+      expect(outlier!.description).toContain("valid range");
     });
   });
 

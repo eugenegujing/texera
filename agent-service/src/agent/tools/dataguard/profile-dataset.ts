@@ -45,6 +45,31 @@ export interface ProfileOptions {
   // detection skips it (free-text columns will hit this and be ignored).
   // Default 20. Set to 0 to disable label detection entirely.
   inconsistentLabelMaxCardinality?: number;
+  // Tukey's IQR fence multiplier for auto outlier detection. Default 1.5
+  // (the classical "mild outlier" threshold). Bump to 3.0 for "extreme
+  // outliers only" or set very high to effectively disable auto-IQR while
+  // still honoring per-column `validRanges`.
+  outlierIqrMultiplier?: number;
+  // Minimum number of numeric, non-missing, non-placeholder observations a
+  // column needs before auto-IQR runs. Below this, quartiles aren't trustworthy
+  // — skip the column silently. Default 10. validRanges still fires at any size.
+  outlierMinObservations?: number;
+  // Whether to run the outlier detector. Default false — disabled because
+  // the IQR-based detector converges to no-op fixes after a few iterative
+  // Apply rounds (capping outliers to the fence eventually produces cells
+  // already at the fence, and the LLM keeps proposing replace_value with
+  // the same fence value, which `apply-fix` correctly treats as a no-op
+  // but the user perceives as "stuck"). validRanges still works as a
+  // per-column override when the caller opts into outlier detection.
+  //
+  // Gating spec:
+  //   !enableOutlierDetection && !validRanges → skip outlier entirely
+  //   !enableOutlierDetection &&  validRanges → run validRange-only (no auto IQR)
+  //    enableOutlierDetection &&  validRanges → validRange + auto IQR for cols w/o ranges
+  //    enableOutlierDetection && !validRanges → auto IQR for every numeric column
+  // Detector code (IQR + range-violation paths) is kept intact so the option
+  // is a flip-of-a-switch — useful when we re-enable after fixing convergence.
+  enableOutlierDetection?: boolean;
 }
 
 const DEFAULT_MAX_INDICES_IN_ISSUE = 50;
@@ -344,31 +369,102 @@ export function profileDataset(
     }
   }
 
-  // Outlier detector — values that fall outside a user-supplied hard range.
-  // We deliberately do NOT auto-detect outliers via z-score: legitimate
-  // consecutive large readings (e.g. clusters of high glucose in a clinical
-  // dataset) would be flagged en masse. Requires the caller to opt in by
-  // providing validRanges per column. Skips rows already flagged as
-  // placeholders so the same row doesn't surface under two issue types.
-  if (options.validRanges) {
-    for (const [col, range] of Object.entries(options.validRanges)) {
-      if (!dataset.columns.includes(col)) continue;
+  // Outlier detector — two-mode:
+  //
+  // 1. Caller supplied `validRanges` for a column → use that hard range
+  //    (authoritative; user-known domain limits).
+  // 2. Otherwise → auto IQR (Tukey's 1.5× fence) on numeric columns. IQR
+  //    uses Q1/Q3 which are robust to a few extreme values AND to small
+  //    clusters of large readings (Q3 absorbs them), so unlike the earlier
+  //    z-score variant it doesn't over-flag legitimate biological clusters.
+  //
+  // Skip in either mode:
+  //   • rows already flagged as placeholder (avoid double-counting)
+  //   • rows already flagged as missing
+  //   • mixed-type columns (require ≥ 80% numeric)
+  //   • too-small samples (need ≥ outlierMinObservations data points)
+  //   • degenerate distributions (IQR === 0, all values clustered)
+  const validRanges = options.validRanges ?? {};
+  const iqrMultiplier = options.outlierIqrMultiplier ?? 1.5;
+  const outlierMinObs = options.outlierMinObservations ?? 10;
+  const enableOutlier = options.enableOutlierDetection ?? false;
+  const hasValidRanges = Object.keys(validRanges).length > 0;
+  // Top-level gate: skip the entire outlier loop only when both auto-IQR is
+  // off AND the caller didn't supply any validRanges. Per spec, an explicit
+  // validRanges override should still fire even when enableOutlierDetection
+  // is false — otherwise users who carefully configured hard ranges would be
+  // silently surprised.
+  if (enableOutlier || hasValidRanges) {
+    for (const col of dataset.columns) {
       const placeholderHits = placeholderHitByColRow.get(col)!;
-      const outlierIndices: number[] = [];
+
+      // Collect numeric, non-placeholder, non-missing values with their row index.
+      const values: Array<{ i: number; v: number }> = [];
+      let nonMissingCount = 0;
       for (let i = 0; i < dataset.rows.length; i++) {
         if (placeholderHits.has(i)) continue;
-        const v = toNumber(dataset.rows[i][col]);
+        const raw = dataset.rows[i][col];
+        if (isMissing(raw, missingTokens)) continue;
+        nonMissingCount++;
+        const v = toNumber(raw);
         if (v === undefined) continue;
-        if (v < range.min || v > range.max) outlierIndices.push(i);
+        values.push({ i, v });
       }
-      if (outlierIndices.length === 0) continue;
+
+      let outlierIndices: number[] = [];
+      let mode: "validRange" | "iqr" | null = null;
+      let evidenceParts = "";
+
+      if (validRanges[col]) {
+        // Mode 1: user-supplied hard range wins per-column. Runs regardless
+        // of enableOutlierDetection so an explicit override is always honored.
+        mode = "validRange";
+        const range = validRanges[col];
+        outlierIndices = values.filter(p => p.v < range.min || p.v > range.max).map(p => p.i);
+        evidenceParts = `Valid range: [${range.min}, ${range.max}]; violations: ${outlierIndices.length}.`;
+      } else if (enableOutlier) {
+        // Mode 2: auto IQR — only when the caller opted in. Guard against
+        // false-positives:
+        //   - too few observations → can't trust quartiles
+        //   - mostly-non-numeric column → skip (can't compare apples to oranges)
+        //   - all values clustered (IQR === 0) → no outliers possible
+        if (values.length < outlierMinObs) continue;
+        if (values.length / Math.max(nonMissingCount, 1) < 0.8) continue;
+
+        const sorted = [...values].sort((a, b) => a.v - b.v);
+        const q1 = quantile(sorted.map(p => p.v), 0.25);
+        const q3 = quantile(sorted.map(p => p.v), 0.75);
+        const iqr = q3 - q1;
+        if (iqr === 0) continue;
+
+        const lowerFence = q1 - iqrMultiplier * iqr;
+        const upperFence = q3 + iqrMultiplier * iqr;
+        outlierIndices = values.filter(p => p.v < lowerFence || p.v > upperFence).map(p => p.i);
+        if (outlierIndices.length === 0) continue;
+        mode = "iqr";
+        evidenceParts =
+          `Q1=${q1.toFixed(2)}, Q3=${q3.toFixed(2)}, IQR=${iqr.toFixed(2)}, ` +
+          `fence=[${lowerFence.toFixed(2)}, ${upperFence.toFixed(2)}] ` +
+          `(Tukey's ${iqrMultiplier}× rule); ${outlierIndices.length} value(s) outside fence.`;
+      } else {
+        // Auto-IQR disabled and no per-column validRange → silently skip.
+        continue;
+      }
+
+      if (mode === null || outlierIndices.length === 0) continue;
+
+      outlierIndices.sort((a, b) => a - b);
       const idx = maybeIndices(outlierIndices, indexCap);
+      const desc =
+        mode === "validRange"
+          ? `${outlierIndices.length} row(s) in ${col} fall outside the valid range [${validRanges[col].min}, ${validRanges[col].max}]`
+          : `${outlierIndices.length} row(s) in ${col} are statistical outliers (Tukey's ${iqrMultiplier}× IQR fence)`;
       issues.push({
         issueId: nextIssueId(),
         issueType: "outlier",
         column: col,
-        description: `${outlierIndices.length} row(s) in ${col} fall outside the valid range [${range.min}, ${range.max}]`,
-        evidence: `Valid range: [${range.min}, ${range.max}]; violations: ${outlierIndices.length}.`,
+        description: desc,
+        evidence: evidenceParts,
         affectedRowCount: outlierIndices.length,
         affectedRowIndices: idx,
         affectedRowKeys: maybeKeys(idx, dataset.rows, dataset.columns),
@@ -378,4 +474,21 @@ export function profileDataset(
   }
 
   return issues;
+}
+
+/**
+ * Linear-interpolation quantile (R-7 / numpy default), Q1 = quantile(0.25),
+ * Q3 = quantile(0.75). Input must be sorted ascending. `q` in [0, 1].
+ * Pure helper — exported for testability.
+ */
+export function quantile(sortedValues: ReadonlyArray<number>, q: number): number {
+  if (sortedValues.length === 0) return NaN;
+  if (sortedValues.length === 1) return sortedValues[0];
+  const pos = (sortedValues.length - 1) * q;
+  const base = Math.floor(pos);
+  const rest = pos - base;
+  if (base + 1 < sortedValues.length) {
+    return sortedValues[base] + rest * (sortedValues[base + 1] - sortedValues[base]);
+  }
+  return sortedValues[base];
 }

@@ -150,6 +150,74 @@ describe("DataGuardChecklistComponent.onShowInResultPanel — locate branching",
     resolveNavigate(true);
   });
 
+  it("JSONL path: computes rowKeyOccurrence as the count of prior identical keys in the cursor walk", async () => {
+    // Simulates a duplicate-row issue: 4 affected rows, 2 unique keys. The
+    // checklist must hand the table-frame the occurrence index so each click
+    // lands on a distinct display row even though all 4 fingerprints are
+    // pairwise identical for the same dup group.
+    //
+    // Pattern [k1, k2, k1, k2] mimics two J001 dups interleaved with two J004
+    // dups (worker-shuffled JSONL). The expected occurrences are:
+    //   click 1 (cursor=0, key=k1): no prior k1 → 0
+    //   click 2 (cursor=1, key=k2): no prior k2 → 0
+    //   click 3 (cursor=2, key=k1): one prior k1 → 1
+    //   click 4 (cursor=3, key=k2): one prior k2 → 1
+    const captured: Array<{ rowKey?: string; rowKeyOccurrence?: number }> = [];
+    const { component } = makeComponent("JSONLFileScan", () => Promise.resolve(true));
+    // Hijack navigate to record what payload it sees (the default spy is fine
+    // but we want both fields in one place per call).
+    const realNavigate = (component as any).rowNavigator.navigate as ReturnType<typeof vi.fn>;
+    realNavigate.mockImplementation((req: NavRequest) => {
+      captured.push({ rowKey: req.rowKey, rowKeyOccurrence: req.rowKeyOccurrence });
+      return Promise.resolve(true);
+    });
+
+    const entry = makeEntry([1, 2, 3, 4], ["k1", "k2", "k1", "k2"]);
+    for (let i = 0; i < 4; i++) await component.onShowInResultPanel(entry);
+
+    expect(captured.map(c => c.rowKey)).toEqual(["k1", "k2", "k1", "k2"]);
+    expect(captured.map(c => c.rowKeyOccurrence)).toEqual([0, 0, 1, 1]);
+  });
+
+  it("JSONL path: four dup clicks (all identical keys) yield occurrences 0..3 and advance the cursor each time", async () => {
+    // True duplicate_id case: every affectedRowKey is the SAME string (k0).
+    // findRowByKey would return the same display index for all 4 clicks; the
+    // occurrence parameter is what saves us. Each click resolves true so the
+    // cursor advances 0→1→2→3 and the requested occurrence walks 0→1→2→3.
+    const captured: Array<{ rowKeyOccurrence?: number }> = [];
+    const { component } = makeComponent("JSONLFileScan", () => Promise.resolve(true));
+    const realNavigate = (component as any).rowNavigator.navigate as ReturnType<typeof vi.fn>;
+    realNavigate.mockImplementation((req: NavRequest) => {
+      captured.push({ rowKeyOccurrence: req.rowKeyOccurrence });
+      return Promise.resolve(true);
+    });
+
+    const sameKey = "dup-key";
+    const entry = makeEntry([10, 11, 12, 13], [sameKey, sameKey, sameKey, sameKey]);
+    for (let i = 0; i < 4; i++) await component.onShowInResultPanel(entry);
+
+    expect(captured.map(c => c.rowKeyOccurrence)).toEqual([0, 1, 2, 3]);
+    expect((component as any).locateCursors.get("issue-1")).toBe(4);
+  });
+
+  it("CSV path: rowKeyOccurrence is irrelevant — no rowKey is sent, occurrence defaults on the table side", async () => {
+    // The CSV branch deliberately skips fingerprint matching entirely (single
+    // worker → display order matches profiler order). It must NOT set rowKey
+    // or rowKeyOccurrence, so the result-table-frame routes to
+    // handleLocateByIndex unchanged.
+    const captured: NavRequest[] = [];
+    const { component } = makeComponent("CSVFileScan", () => Promise.resolve(true));
+    const realNavigate = (component as any).rowNavigator.navigate as ReturnType<typeof vi.fn>;
+    realNavigate.mockImplementation((req: NavRequest) => {
+      captured.push(req);
+      return Promise.resolve(true);
+    });
+    const entry = makeEntry([0, 1, 2, 3], ["k0", "k0", "k0", "k0"]);
+    await component.onShowInResultPanel(entry);
+    expect(captured[0].rowKey).toBeUndefined();
+    expect(captured[0].rowKeyOccurrence).toBeUndefined();
+  });
+
   it("JSONL path: cursor advances only after navigate() resolves true, stays put on false", async () => {
     // First click: navigate resolves true → cursor advances.
     const { component, navigateSpy } = makeComponent("JSONLFileScan", () => Promise.resolve(true));
