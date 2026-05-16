@@ -121,6 +121,59 @@ describe("profileDataset", () => {
     expect(dup!.affectedRowCount).toBe(2);
   });
 
+  test("auto-infers idColumn from name patterns (sample_id) when caller omits it", () => {
+    // The auto-trigger pipeline POSTs /scan with an empty body — without this
+    // inference, dup-ID detection would never fire on user files. Match must
+    // be conservative (id-like column names only), not value-based.
+    const ds: DatasetView = {
+      columns: ["sample_id", "age"],
+      rows: [
+        { sample_id: "S1", age: 30 },
+        { sample_id: "S2", age: 40 },
+        { sample_id: "S1", age: 30 },
+      ],
+    };
+    const issues = profileDataset(ds);
+    const dup = issues.find(i => i.issueType === "duplicate_id");
+    expect(dup).toBeDefined();
+    expect(dup!.column).toBe("sample_id");
+    expect(dup!.affectedRowCount).toBe(2);
+  });
+
+  test("auto-infer recognizes bare `id`, `*Id`, `id_*` patterns too", () => {
+    const cases: Array<{ col: string }> = [
+      { col: "id" },
+      { col: "userId" },
+      { col: "id_card" },
+      { col: "ID" },
+    ];
+    for (const { col } of cases) {
+      const ds: DatasetView = {
+        columns: [col, "value"],
+        rows: [
+          { [col]: "a", value: 1 },
+          { [col]: "a", value: 2 },
+          { [col]: "b", value: 3 },
+        ],
+      };
+      const issues = profileDataset(ds);
+      const dup = issues.find(i => i.issueType === "duplicate_id");
+      expect(dup).toBeDefined();
+      expect(dup!.column).toBe(col);
+    }
+  });
+
+  test("auto-infer does NOT fire when no column name looks like an ID", () => {
+    // Conservative: just having repeated values isn't enough — the user's
+    // workflow may legitimately have duplicate categorical labels.
+    const ds: DatasetView = {
+      columns: ["color", "qty"],
+      rows: [{ color: "red", qty: 1 }, { color: "red", qty: 2 }],
+    };
+    const issues = profileDataset(ds);
+    expect(issues.find(i => i.issueType === "duplicate_id")).toBeUndefined();
+  });
+
   test("no idColumn → no duplicate_id issue even with repeated values", () => {
     const ds: DatasetView = {
       columns: ["x"],
@@ -130,7 +183,7 @@ describe("profileDataset", () => {
     expect(issues.find(i => i.issueType === "duplicate_id")).toBeUndefined();
   });
 
-  test("validRanges → detects out-of-range values", () => {
+  test("validRanges → detects outlier values", () => {
     const ds: DatasetView = {
       columns: ["bmi"],
       rows: [
@@ -138,18 +191,18 @@ describe("profileDataset", () => {
       ],
     };
     const issues = profileDataset(ds, { validRanges: { bmi: { min: 10, max: 60 } } });
-    const oor = issues.find(i => i.issueType === "out_of_range");
-    expect(oor).toBeDefined();
-    expect(oor!.affectedRowCount).toBe(2);
+    const outlier = issues.find(i => i.issueType === "outlier");
+    expect(outlier).toBeDefined();
+    expect(outlier!.affectedRowCount).toBe(2);
   });
 
-  test("placeholder values are not double-counted as out_of_range", () => {
+  test("placeholder values are not double-counted as outliers", () => {
     const ds: DatasetView = {
       columns: ["age"],
       rows: [{ age: 25 }, { age: 999 }, { age: 30 }],
     };
     const issues = profileDataset(ds, { validRanges: { age: { min: 0, max: 130 } } });
-    expect(issues.find(i => i.issueType === "out_of_range")).toBeUndefined();
+    expect(issues.find(i => i.issueType === "outlier")).toBeUndefined();
     expect(issues.find(i => i.issueType === "placeholder_value")).toBeDefined();
   });
 
@@ -204,6 +257,109 @@ describe("profileDataset", () => {
     expect(kinds.has("placeholder_value")).toBe(true);
     expect(kinds.has("missing_value")).toBe(true);
     expect(kinds.has("duplicate_id")).toBe(true);
-    expect(kinds.has("out_of_range")).toBe(true);
+    expect(kinds.has("outlier")).toBe(true);
+  });
+
+  describe("outlier detector (validRanges-based)", () => {
+    test("does not fire without validRanges hint — earlier z-score variant was removed", () => {
+      // 19 values near 50, one extreme reading at 500. The old z-score
+      // detector would have flagged the 500 automatically; the validRanges
+      // detector requires the caller to opt in by supplying a hard range.
+      const rows: Array<Record<string, unknown>> = [];
+      for (let i = 0; i < 19; i++) rows.push({ v: 50 + (i % 3) });
+      rows.push({ v: 500 });
+      const issues = profileDataset({ columns: ["v"], rows });
+      expect(issues.find(i => i.issueType === "outlier")).toBeUndefined();
+    });
+
+    test("flags values outside the user-supplied range", () => {
+      const rows: Array<Record<string, unknown>> = [];
+      for (let i = 0; i < 19; i++) rows.push({ age: 30 + (i % 5) });
+      rows.push({ age: 500 });
+      const issues = profileDataset(
+        { columns: ["age"], rows },
+        { validRanges: { age: { min: 0, max: 120 } } }
+      );
+      const outlier = issues.find(i => i.issueType === "outlier" && i.column === "age");
+      expect(outlier).toBeDefined();
+      expect(outlier!.affectedRowCount).toBe(1);
+      expect(outlier!.affectedRowIndices).toEqual([19]);
+    });
+
+    test("does NOT flag clusters of consecutive large readings — the whole point of the redesign", () => {
+      // The earlier z-score detector would have flagged half of this column.
+      // We deliberately don't: the user owns the definition of "out of range",
+      // and unless they say so, clustered extremes are real data.
+      const rows: Array<Record<string, unknown>> = [];
+      for (let i = 0; i < 10; i++) rows.push({ glucose: 100 });
+      for (let i = 0; i < 10; i++) rows.push({ glucose: 400 }); // sustained high
+      const issues = profileDataset({ columns: ["glucose"], rows });
+      expect(issues.find(i => i.issueType === "outlier")).toBeUndefined();
+    });
+  });
+
+  describe("inconsistent_label detector", () => {
+    test("flags rows using non-canonical spellings of the same label", () => {
+      const ds: DatasetView = {
+        columns: ["gender"],
+        rows: [
+          { gender: "Male" },
+          { gender: "Male" },
+          { gender: "Male" },
+          { gender: "male" },
+          { gender: "MALE" },
+          { gender: "Female" },
+          { gender: "Female" },
+          { gender: "female" },
+        ],
+      };
+      const issues = profileDataset(ds);
+      const ilab = issues.find(i => i.issueType === "inconsistent_label" && i.column === "gender");
+      expect(ilab).toBeDefined();
+      // "male" and "MALE" are non-canonical variants of "Male" (most common);
+      // "female" is non-canonical variant of "Female". Total: 3 rows.
+      expect(ilab!.affectedRowCount).toBe(3);
+    });
+
+    test("ignores columns that are pure data (every value unique)", () => {
+      const ds: DatasetView = {
+        columns: ["note"],
+        rows: Array.from({ length: 30 }, (_, i) => ({ note: `note-${i}` })),
+      };
+      const issues = profileDataset(ds);
+      expect(issues.find(i => i.issueType === "inconsistent_label")).toBeUndefined();
+    });
+
+    test("ignores columns above cardinality cap (likely free text)", () => {
+      const rows: Array<Record<string, unknown>> = [];
+      for (let i = 0; i < 25; i++) rows.push({ tag: `tag${i}` });
+      // Add a clear inconsistency for the 26th distinct group — but we exceed the cap.
+      rows.push({ tag: "tag1 " }); // would collide with "tag1" if checked
+      const issues = profileDataset(
+        { columns: ["tag"], rows },
+        { inconsistentLabelMaxCardinality: 20 }
+      );
+      expect(issues.find(i => i.issueType === "inconsistent_label")).toBeUndefined();
+    });
+
+    test("disabled when inconsistentLabelMaxCardinality = 0", () => {
+      const ds: DatasetView = {
+        columns: ["g"],
+        rows: [{ g: "A" }, { g: "a" }, { g: "A" }],
+      };
+      const issues = profileDataset(ds, { inconsistentLabelMaxCardinality: 0 });
+      expect(issues.find(i => i.issueType === "inconsistent_label")).toBeUndefined();
+    });
+
+    test("does not flag when all spellings agree (genuine low-cardinality categorical)", () => {
+      const ds: DatasetView = {
+        columns: ["group"],
+        rows: [
+          { group: "A" }, { group: "A" }, { group: "A" }, { group: "B" }, { group: "B" },
+        ],
+      };
+      const issues = profileDataset(ds);
+      expect(issues.find(i => i.issueType === "inconsistent_label")).toBeUndefined();
+    });
   });
 });

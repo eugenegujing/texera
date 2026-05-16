@@ -974,8 +974,8 @@ export class AgentService {
   public sendDecision(
     agentId: string,
     stepId: string,
-    verdict: "allow" | "deny" | "modify",
-    options: { modifiedAction?: string; remember?: boolean } = {}
+    verdict: "allow" | "deny",
+    options: { remember?: boolean } = {}
   ): void {
     const tracking = this.agentStateTracking.get(agentId);
     if (!tracking?.websocket || tracking.websocket.readyState !== WebSocket.OPEN) {
@@ -988,7 +988,6 @@ export class AgentService {
           type: "decision",
           stepId,
           verdict,
-          modifiedAction: options.modifiedAction,
           remember: options.remember,
         })
       );

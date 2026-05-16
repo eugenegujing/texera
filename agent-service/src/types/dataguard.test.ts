@@ -113,6 +113,8 @@ describe("DataGuard type shapes", () => {
     };
     expect(entry.userDecision).toBe("allow");
     expect(entry.appliedAt).toBeDefined();
+    // @ts-expect-error modifiedAction was cut from DecisionLogEntry by #11a;
+    // this assertion locks the absence of the property at the type level.
     expect(entry.modifiedAction).toBeUndefined();
   });
 
@@ -131,23 +133,6 @@ describe("DataGuard type shapes", () => {
     expect(entry.appliedAt).toBeUndefined();
   });
 
-  test("DecisionLogEntry: modified — carries modifiedAction", () => {
-    const entry: DecisionLogEntry = {
-      decisionId: "dec-3",
-      timestamp: "2026-05-14T12:02:00.000Z",
-      issueType: "missing_value",
-      targetRowCount: 17,
-      proposedAction: "Impute missing glucose with group median",
-      userDecision: "modify",
-      modifiedAction: "Flag for manual review",
-      reason: "Imbalance across groups makes imputation risky.",
-      confidence: "medium",
-      appliedAt: "2026-05-14T12:02:05.000Z",
-    };
-    expect(entry.userDecision).toBe("modify");
-    expect(entry.modifiedAction).toBe("Flag for manual review");
-  });
-
   test("AutoAllowRule: per-issue-type policy", () => {
     const rule: AutoAllowRule = {
       ruleId: "rule-1",
@@ -164,17 +149,6 @@ describe("DataGuard type shapes", () => {
       remember: true,
     };
     expect(decision.remember).toBe(true);
-    expect(decision.modifiedAction).toBeUndefined();
-  });
-
-  test("PermissionDecision: modify with modifiedAction", () => {
-    const decision: PermissionDecision = {
-      stepId: "step-42",
-      verdict: "modify",
-      modifiedAction: "Flag for manual review instead of impute",
-    };
-    expect(decision.verdict).toBe("modify");
-    expect(decision.modifiedAction).toBeDefined();
   });
 
   test("PermissionDecision: deny", () => {
@@ -186,13 +160,12 @@ describe("DataGuard type shapes", () => {
   });
 
   test("Literal unions accept all documented members", () => {
-    const risks: RiskTier[] = ["low", "medium", "high"];
+    const risks: RiskTier[] = ["low", "medium", "high", "warning"];
     const confidences: Confidence[] = ["low", "medium", "high"];
     const issueTypes: IssueType[] = [
       "placeholder_value",
       "missing_value",
       "duplicate_id",
-      "out_of_range",
       "outlier",
       "inconsistent_label",
     ];
@@ -200,7 +173,6 @@ describe("DataGuard type shapes", () => {
       "replace_value",
       "drop_rows",
       "impute",
-      "flag",
       "standardize",
       "trim_whitespace",
       "rename_column",
@@ -208,14 +180,13 @@ describe("DataGuard type shapes", () => {
     const verdicts: Verdict[] = [
       "allow",
       "deny",
-      "modify",
       "auto_allow_low_risk",
       "auto_allow_remembered",
     ];
-    expect(risks).toHaveLength(3);
+    expect(risks).toHaveLength(4);
     expect(confidences).toHaveLength(3);
-    expect(issueTypes).toHaveLength(6);
-    expect(opKinds).toHaveLength(7);
-    expect(verdicts).toHaveLength(5);
+    expect(issueTypes).toHaveLength(5);
+    expect(opKinds).toHaveLength(6);
+    expect(verdicts).toHaveLength(4);
   });
 });

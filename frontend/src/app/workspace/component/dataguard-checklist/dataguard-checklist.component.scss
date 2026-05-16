@@ -1,0 +1,319 @@
+.dg-panel {
+  position: fixed;
+  bottom: 100px;
+  right: 80px;
+  width: 480px;
+  max-height: 70vh;
+  background: #fff;
+  border: 1px solid #d9d9d9;
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  font-size: 0.85rem;
+}
+
+.dg-panel__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #f0f0f0;
+  background: #fafafa;
+  border-radius: 8px 8px 0 0;
+  // Header is the cdkDragHandle; show a move cursor so it's discoverable.
+  cursor: move;
+
+  // The close button inside the header should still feel clickable, not draggable.
+  .dg-panel__close {
+    cursor: pointer;
+  }
+}
+
+// While dragging, the CDK adds .cdk-drag-preview to the moving copy.
+.dg-panel.cdk-drag-preview {
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.25);
+}
+
+.dg-panel__title {
+  font-weight: 600;
+  font-size: 0.95rem;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+}
+
+.dg-panel__status {
+  font-size: 0.75rem;
+  color: #8c8c8c;
+  background: #f0f5ff;
+  padding: 2px 8px;
+  border-radius: 12px;
+}
+
+.dg-panel__close {
+  margin-left: auto;
+}
+
+.dg-panel__sub {
+  padding: 8px 12px;
+  border-bottom: 1px solid #f5f5f5;
+  font-size: 0.78rem;
+  color: #595959;
+
+  code {
+    background: #f5f5f5;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 0.75rem;
+  }
+}
+
+.dg-panel__message {
+  margin-top: 4px;
+  font-style: italic;
+  color: #1890ff;
+}
+
+.dg-row__category {
+  display: inline-block;
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: #e6f4ff;
+  color: #003eb3;
+  margin-right: 6px;
+}
+
+.dg-panel__empty {
+  padding: 24px;
+  text-align: center;
+  color: #8c8c8c;
+
+  &--clean {
+    color: #389e0d;
+  }
+}
+
+.dg-panel__categories {
+  padding: 6px 12px;
+  border-bottom: 1px solid #f5f5f5;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-size: 0.74rem;
+  color: #003eb3;
+  background: #f0f8ff;
+}
+
+.dg-panel__category-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 500;
+}
+
+.dg-panel__category-sep {
+  margin: 0 2px;
+  color: #adc6ff;
+  font-weight: 400;
+}
+
+.dg-panel__bulk {
+  padding: 6px 12px;
+  border-bottom: 1px solid #f5f5f5;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.75rem;
+  color: #595959;
+}
+
+.dg-panel__bulk-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.dg-panel__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.dg-row {
+  padding: 10px 12px;
+  border-bottom: 1px solid #f5f5f5;
+  transition: background 0.15s;
+
+  &:last-child {
+    border-bottom: none;
+  }
+
+  &--allow {
+    background: #f6ffed;
+  }
+
+  &--deny {
+    background: #fff1f0;
+    opacity: 0.75;
+  }
+
+  &--error {
+    background: #fff7e6;
+  }
+}
+
+.dg-row__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.dg-row__action {
+  font-weight: 500;
+  margin-left: 4px;
+}
+
+.dg-row__tier {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 4px;
+  letter-spacing: 0.5px;
+  flex-shrink: 0;
+
+  &--low {
+    background: #d9f7be;
+    color: #389e0d;
+  }
+
+  &--medium {
+    background: #fff1b8;
+    color: #d48806;
+  }
+
+  &--high {
+    background: #ffccc7;
+    color: #cf1322;
+  }
+
+  &--warning {
+    background: #ffe7ba;
+    color: #ad4e00;
+  }
+}
+
+.dg-row__details {
+  margin: 6px 0 0 26px;
+  font-size: 0.75rem;
+  color: #595959;
+  line-height: 1.4;
+}
+
+.dg-row__field {
+  margin: 2px 0;
+}
+
+.dg-row__field--error {
+  color: #cf1322;
+}
+
+// "Locate this issue in the result panel" affordance — visually a flat link
+// that sits on the same line as the column/row-count detail, so users don't
+// see a second control to think about.
+.dg-row__locate {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  margin: 2px 0;
+  background: transparent;
+  border: none;
+  font: inherit;
+  color: #1677ff;
+  cursor: pointer;
+  text-align: left;
+
+  i {
+    font-size: 0.85rem;
+  }
+
+  &:hover {
+    text-decoration: underline;
+  }
+
+  &:focus-visible {
+    outline: 1px dashed #1677ff;
+    outline-offset: 2px;
+  }
+}
+
+.dg-row__foot {
+  margin-top: 6px;
+  margin-left: 22px;
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.dg-row__remember {
+  margin-left: 8px;
+  font-size: 0.72rem;
+  color: #8c8c8c;
+}
+
+.dg-panel__foot {
+  padding: 10px 12px;
+  border-top: 1px solid #f0f0f0;
+  background: #fafafa;
+  border-radius: 0 0 8px 8px;
+  text-align: right;
+}
+
+.dg-panel__foot--split {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+// Floating "open DataGuard" button, sits where the panel used to be.
+// Lives on the canvas overlay layer so it doesn't interfere with operators.
+.dg-floater {
+  position: fixed;
+  bottom: 100px;
+  right: 80px;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 1px solid #91caff;
+  background: #e6f4ff;
+  cursor: pointer;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  transition: background 0.15s, transform 0.1s;
+
+  i {
+    font-size: 1.4rem;
+  }
+
+  &:hover {
+    background: #bae0ff;
+  }
+
+  &:active {
+    transform: scale(0.95);
+  }
+}

@@ -36,25 +36,29 @@ const fixProposalSchema = z.object({
     "replace_value",
     "drop_rows",
     "impute",
-    "flag",
     "standardize",
     "trim_whitespace",
     "rename_column",
   ]),
   operationParams: z.record(z.string(), z.unknown()),
-  riskTier: z.enum(["low", "medium", "high"]),
+  riskTier: z.enum(["low", "medium", "high", "warning"]),
   reason: z.string().min(1),
   evidence: z.string().min(1),
   confidence: z.enum(["low", "medium", "high"]),
   targetRowCount: z.number().int().nonnegative(),
 });
 
+// `warning` here = "we have a concrete fix but recommend a human eyeball it
+// first" — the checklist UI defaults these to unchecked. Used for cases where
+// auto-applying could destroy meaningful signal (outliers that might be real
+// extremes, biologically plausible out-of-range values).
 const DEFAULT_RISK_TIER_BY_ISSUE: Record<string, RiskTier> = {
   placeholder_value: "medium",
   missing_value: "medium",
   duplicate_id: "high",
-  out_of_range: "medium",
-  outlier: "high",
+  // `outlier` is the validRanges-based detector — see profile-dataset.ts. The
+  // earlier z-score outlier detector was removed.
+  outlier: "warning",
   inconsistent_label: "medium",
 };
 
@@ -94,6 +98,10 @@ export async function suggestFix(
 
 export function buildPrompt(issue: DataQualityIssue): string {
   const defaultTier = DEFAULT_RISK_TIER_BY_ISSUE[issue.issueType] ?? "medium";
+  const indicesLine =
+    issue.affectedRowIndices && issue.affectedRowIndices.length > 0
+      ? `\n- affectedRowIndices: [${issue.affectedRowIndices.join(", ")}]`
+      : "";
   return `You are a data-cleaning assistant. Propose a single concrete fix for the following data-quality issue. Reply with one JSON object only — no prose, no markdown, no fences.
 
 Issue:
@@ -101,14 +109,14 @@ Issue:
 - column: ${issue.column}
 - description: ${issue.description}
 - evidence: ${issue.evidence}
-- affectedRowCount: ${issue.affectedRowCount}
+- affectedRowCount: ${issue.affectedRowCount}${indicesLine}
 
 Required JSON shape:
 {
   "action": "<one-sentence human-readable description of the fix>",
-  "operationKind": "replace_value | drop_rows | impute | flag | standardize | trim_whitespace | rename_column",
+  "operationKind": "replace_value | drop_rows | impute | standardize | trim_whitespace | rename_column",
   "operationParams": { ...operation-specific params... },
-  "riskTier": "low | medium | high",
+  "riskTier": "low | medium | high | warning",
   "reason": "<one-sentence justification>",
   "evidence": "<one-sentence supporting data from the issue>",
   "confidence": "low | medium | high",
@@ -116,15 +124,25 @@ Required JSON shape:
 }
 
 operationParams by kind:
-- replace_value: { "column": string, "match": any, "replacement": any }
+- replace_value: { "column": string, "replacement": any, "rowIndices"?: number[], "match"?: any }
+    Use "rowIndices" when the issue gives you affectedRowIndices — index targeting
+    is deterministic. Use "match" only for value-based swaps (e.g. replace every
+    literal "unknown" with null) when you don't have indices. Never invent a
+    "match" value from aggregate stats — silent no-ops happen when match doesn't
+    equal the cell exactly (e.g. 950 vs 950.0 vs "950").
 - drop_rows: { "rowIndices": number[] }
 - impute: { "column": string, "strategy": "mean" | "median" | "mode" }
-- flag: { "rowIndices": number[] }
 - standardize: { "column": string, "mapping": { [from: string]: string } }
 - trim_whitespace: { "column": string }
 - rename_column: { "from": string, "to": string }
 
-Default risk tier for ${issue.issueType}: ${defaultTier}. Override only with a strong reason. Prefer "flag" or "impute" over destructive "drop_rows".`;
+Rules:
+- Every proposal must be a concrete, applicable fix — no "flag-and-do-nothing" options.
+- For outlier issues (values outside the valid range stated in description / evidence): use replace_value with "rowIndices" set to the affectedRowIndices and "replacement" set to the nearest valid bound (min or max from the range), or to null if no bound is sensible. Never use "match" for outliers — always use rowIndices.
+- Set riskTier="warning" when you have a concrete fix but the user really should eyeball it before applying — typical for outlier values that are unusual but possibly real (extreme biological readings, etc.). The UI defaults these to unchecked so the user makes an explicit call.
+- Prefer impute over drop_rows for missing values.
+
+Default risk tier for ${issue.issueType}: ${defaultTier}. Override only with a strong reason.`;
 }
 
 function stripCodeFences(s: string): string {

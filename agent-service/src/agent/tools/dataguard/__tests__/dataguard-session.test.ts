@@ -58,7 +58,6 @@ describe("DataGuardSession", () => {
     expect(s.getDataset()).toBe(ds);
     expect(s.getIssues()).toEqual([]);
     expect(s.getDecisionLog()).toEqual([]);
-    expect(s.getFlaggedRows()).toEqual([]);
   });
 
   test("recordIssue accumulates and dedupes by issueId", () => {
@@ -110,10 +109,4 @@ describe("DataGuardSession", () => {
     expect(s.matchesAutoAllowRule("placeholder_value")).toBe(false);
   });
 
-  test("addFlaggedRows merges + dedupes + sorts", () => {
-    const s = new DataGuardSession();
-    s.addFlaggedRows([3, 1, 2]);
-    s.addFlaggedRows([2, 5]);
-    expect(s.getFlaggedRows()).toEqual([1, 2, 3, 5]);
-  });
 });

@@ -19,8 +19,8 @@
 
 // Per-agent DataGuard run state. One DataGuardSession lives on each
 // TexeraAgent (lazy-initialized when the first DataGuard tool fires) and
-// holds the working dataset, accumulated issues, decision log, flagged rows,
-// and auto-allow rules. Independent of the workflow state so resetting one
+// holds the working dataset, accumulated issues, decision log, and
+// auto-allow rules. Independent of the workflow state so resetting one
 // does not affect the other.
 
 import type {
@@ -36,8 +36,16 @@ import type { DatasetView } from "./dataset";
 export interface RecordDecisionInput {
   proposal: FixProposal;
   verdict: Verdict;
-  modifiedAction?: string;
   applied: boolean;
+}
+
+// Profiler options the user supplied at /scan time. Stored so the post-apply
+// re-scan can use the same configuration the issues were originally found with.
+export interface ScanOptions {
+  idColumn?: string;
+  validRanges?: Record<string, { min: number; max: number }>;
+  placeholderValues?: Array<string | number>;
+  missingTokens?: string[];
 }
 
 export class DataGuardSession {
@@ -45,10 +53,18 @@ export class DataGuardSession {
   private issues: Map<string, DataQualityIssue> = new Map();
   private proposals: Map<string, FixProposal> = new Map();
   private decisionLog: DecisionLogEntry[] = [];
-  private flaggedRows: Set<number> = new Set();
   private autoAllowRules: Map<string, AutoAllowRule> = new Map();
+  private scanOptions: ScanOptions = {};
   private decisionCounter = 0;
   private ruleCounter = 0;
+
+  setScanOptions(opts: ScanOptions): void {
+    this.scanOptions = { ...opts };
+  }
+
+  getScanOptions(): ScanOptions {
+    return this.scanOptions;
+  }
 
   setDataset(dataset: DatasetView): void {
     this.dataset = dataset;
@@ -57,7 +73,6 @@ export class DataGuardSession {
     this.issues.clear();
     this.proposals.clear();
     this.decisionLog = [];
-    this.flaggedRows.clear();
   }
 
   recordProposal(proposal: FixProposal): void {
@@ -98,7 +113,6 @@ export class DataGuardSession {
       targetRowCount: input.proposal.targetRowCount,
       proposedAction: input.proposal.action,
       userDecision: input.verdict,
-      modifiedAction: input.modifiedAction,
       reason: input.proposal.reason,
       confidence: input.proposal.confidence,
       appliedAt: input.applied ? now : undefined,
@@ -109,14 +123,6 @@ export class DataGuardSession {
 
   getDecisionLog(): DecisionLogEntry[] {
     return [...this.decisionLog];
-  }
-
-  addFlaggedRows(indices: number[]): void {
-    for (const i of indices) this.flaggedRows.add(i);
-  }
-
-  getFlaggedRows(): number[] {
-    return Array.from(this.flaggedRows).sort((a, b) => a - b);
   }
 
   addAutoAllowRule(issueType: IssueType): AutoAllowRule {

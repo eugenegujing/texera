@@ -59,6 +59,7 @@ import { MenuComponent } from "./menu/menu.component";
 import { MiniMapComponent } from "./workflow-editor/mini-map/mini-map.component";
 import { LeftPanelComponent } from "./left-panel/left-panel.component";
 import { AgentPanelComponent } from "./agent/agent-panel/agent-panel.component";
+import { DataGuardChecklistComponent } from "./dataguard-checklist/dataguard-checklist.component";
 import { PropertyEditorComponent } from "./property-editor/property-editor.component";
 import { FormlyRepeatDndComponent } from "../../common/formly/repeat-dnd/repeat-dnd.component";
 
@@ -82,6 +83,7 @@ export const SAVE_DEBOUNCE_TIME_IN_MS = 5000;
     LeftPanelComponent,
     NgIf,
     AgentPanelComponent,
+    DataGuardChecklistComponent,
     PropertyEditorComponent,
     FormlyRepeatDndComponent,
   ],

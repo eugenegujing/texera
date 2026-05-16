@@ -30,6 +30,7 @@ import { createLogger } from "./logger";
 
 const log = createLogger("Server");
 const wsLog = createLogger("WS");
+import type { DataQualityIssue } from "./types/dataguard";
 import type {
   AgentInfo,
   AgentDelegateConfig,
@@ -137,12 +138,22 @@ function getAgent(agentId: string): TexeraAgent {
   return agent;
 }
 
-const agentsRouter = new Elysia({ prefix: "/agents" })
+// `normalize: false` keeps unknown fields in the parsed body so additionalProperties:false
+// schemas can reject them (Elysia 1.4 strips by default otherwise — see #11a tests).
+const agentsRouter = new Elysia({ prefix: "/agents", normalize: false })
   // Error handler must live on the same Elysia instance whose routes throw, or
   // its scope will not see the errors. Elysia 1.x defaults to local scoping for
   // .onError, so attach here rather than on the outer app.
-  .onError(({ error, set }) => {
+  .onError(({ error, code, set }) => {
     log.error({ err: error }, "request error");
+    // Elysia body-schema rejection — surface as 400 so callers can distinguish
+    // bad input from server bugs. Without this, every typebox validation error
+    // ends up as a 500 and the modify-cut tests can't tell whether the route
+    // rejected the bad verdict or crashed.
+    if (code === "VALIDATION") {
+      set.status = 400;
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
     const errorMessage = error instanceof Error ? error.message : String(error);
     if (errorMessage === "Agent not found") {
       set.status = 404;
@@ -345,6 +356,228 @@ const agentsRouter = new Elysia({ prefix: "/agents" })
     }
   )
 
+  // Server-driven DataGuard scan. Runs profile_dataset + suggest_fix entirely
+  // server-side (no chat / no LLM tool loop), returns a flat list of issues
+  // each paired with a FixProposal. The checklist UI consumes this directly.
+  //
+  // Body (optional): { idColumn?, validRanges?, placeholderValues?, missingTokens? }
+  // — same profile_dataset options, all optional.
+  .post(
+    "/:id/dataguard/scan",
+    async ({ params: { id }, body }) => {
+      const agent = getAgent(id);
+      const session = agent.getDataGuardSession();
+      const dataset = session.getDataset();
+      if (!dataset) {
+        return { error: "No dataset loaded. Call /dataguard/dataset first." };
+      }
+      const { profileDataset } = await import("./agent/tools/dataguard/profile-dataset");
+      const { suggestFix } = await import("./agent/tools/dataguard/suggest-fix");
+      const scanOptions = {
+        idColumn: body?.idColumn,
+        validRanges: body?.validRanges,
+        placeholderValues: body?.placeholderValues,
+        missingTokens: body?.missingTokens,
+      };
+      session.setScanOptions(scanOptions);
+      const issues = profileDataset(dataset, scanOptions);
+      for (const issue of issues) session.recordIssue(issue);
+
+      // Generate a proposal per issue in parallel. Each calls the LLM once.
+      const llmCall = (prompt: string) => agent.callLlm(prompt);
+      const proposals = await Promise.all(
+        issues.map(async issue => {
+          try {
+            const p = await suggestFix(issue, { llmCall });
+            session.recordProposal(p);
+            return { issueId: issue.issueId, proposal: p, error: null };
+          } catch (e: unknown) {
+            const msg = e instanceof Error ? e.message : String(e);
+            return { issueId: issue.issueId, proposal: null, error: msg };
+          }
+        })
+      );
+      return { issueCount: issues.length, issues, proposals };
+    },
+    {
+      body: t.Optional(
+        t.Object({
+          idColumn: t.Optional(t.String()),
+          validRanges: t.Optional(t.Record(t.String(), t.Object({ min: t.Number(), max: t.Number() }))),
+          placeholderValues: t.Optional(t.Array(t.Union([t.String(), t.Number()]))),
+          missingTokens: t.Optional(t.Array(t.String())),
+        })
+      ),
+    }
+  )
+
+  // Apply a user-selected batch of FixProposals (the checklist UI sends this
+  // when the user clicks "Apply Selected"). Each entry in `decisions` is one
+  // checkbox row: { issueId, verdict, remember? }.
+  .post(
+    "/:id/dataguard/apply-batch",
+    async ({ params: { id }, body, set }) => {
+      const agent = getAgent(id);
+      const session = agent.getDataGuardSession();
+      const { applyFix } = await import("./agent/tools/dataguard/apply-fix");
+
+      // `remember` only applies when the user approves a fix — it adds the
+      // issueType to autoAllowRules so future similar fixes are pre-approved.
+      // Pairing it with deny is nonsense and would silently teach the agent
+      // an unintended rule, so we reject the whole batch (#12).
+      const badRemember = body.decisions.find(d => d.verdict === "deny" && d.remember === true);
+      if (badRemember) {
+        set.status = 400;
+        return {
+          error: `decision for issueId="${badRemember.issueId}" combines verdict="deny" with remember=true; remember only applies to allow.`,
+        };
+      }
+
+      // Belt-and-suspenders rejection of legacy fields (e.g., #11a's
+      // `modifiedAction`). The typebox schema sets additionalProperties:false,
+      // but Elysia's body parser sometimes strips unknown keys before
+      // validation; this explicit check guarantees an honest 400.
+      const KNOWN_KEYS = new Set(["issueId", "verdict", "remember"]);
+      const rawBody = body as unknown as { decisions: Array<Record<string, unknown>> };
+      for (let i = 0; i < rawBody.decisions.length; i++) {
+        const entry = rawBody.decisions[i];
+        const extras = Object.keys(entry).filter(k => !KNOWN_KEYS.has(k));
+        if (extras.length > 0) {
+          set.status = 400;
+          return {
+            error: `decision at index ${i} has unknown field(s): ${extras.join(", ")}. Allowed: issueId, verdict, remember.`,
+          };
+        }
+      }
+
+      const results: Array<{
+        issueId: string;
+        verdict: string;
+        applied: boolean;
+        rowsAffected: number;
+        error?: string;
+      }> = [];
+
+      let dataset = session.getDataset();
+      if (!dataset) return { error: "No dataset loaded." };
+
+      for (const decision of body.decisions) {
+        const proposal = session.getProposal(decision.issueId);
+        if (!proposal) {
+          results.push({
+            issueId: decision.issueId,
+            verdict: decision.verdict,
+            applied: false,
+            rowsAffected: 0,
+            error: "no proposal for this issueId — call /scan first",
+          });
+          continue;
+        }
+        if (decision.verdict === "deny") {
+          session.recordDecision({ proposal, verdict: "deny", applied: false });
+          results.push({ issueId: decision.issueId, verdict: "deny", applied: false, rowsAffected: 0 });
+          continue;
+        }
+        try {
+          // Thread the session's scan-time missingTokens into applyFix so that
+          // user-configured tokens (e.g. ["xyz"]) are treated as missing by
+          // impute, matching what the profiler flagged.
+          const out = applyFix(dataset, proposal, {
+            missingTokens: session.getScanOptions().missingTokens,
+          });
+          dataset = out.dataset;
+          session.updateDataset(dataset);
+          session.recordDecision({
+            proposal,
+            verdict: decision.verdict,
+            applied: true,
+          });
+          if (decision.remember) {
+            session.addAutoAllowRule(proposal.issueType);
+          }
+          results.push({
+            issueId: decision.issueId,
+            verdict: decision.verdict,
+            applied: true,
+            rowsAffected: out.rowsAffected,
+          });
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          results.push({
+            issueId: decision.issueId,
+            verdict: decision.verdict,
+            applied: false,
+            rowsAffected: 0,
+            error: msg,
+          });
+        }
+      }
+      // Verification pass: re-run the profiler on the cleaned dataset so the
+      // UI can surface anything the proposals didn't actually fix. These are
+      // genuine leftovers (denied fixes, anything impute couldn't compute,
+      // etc.). The earlier split into "acknowledged" (flag-for-review) is
+      // gone because the flag op kind is gone — every proposal now produces a
+      // real concrete change.
+      let residualIssues: DataQualityIssue[] = [];
+      if (dataset) {
+        const { profileDataset } = await import("./agent/tools/dataguard/profile-dataset");
+        residualIssues = profileDataset(dataset, session.getScanOptions());
+      }
+      return {
+        applied: results.filter(r => r.applied).length,
+        denied: results.filter(r => r.verdict === "deny").length,
+        failed: results.filter(r => !r.applied && r.verdict !== "deny").length,
+        datasetRowCount: dataset?.rows.length ?? 0,
+        results,
+        residualIssues,
+        residualCount: residualIssues.length,
+      };
+    },
+    {
+      body: t.Object({
+        decisions: t.Array(
+          t.Object(
+            {
+              issueId: t.String(),
+              // "modify" was cut by #11a — body schema must reject it (the
+              // legacy handler executed the original proposalParams anyway and
+              // only logged the user's free-text, which silently lied to users).
+              verdict: t.Union([t.Literal("allow"), t.Literal("deny")]),
+              remember: t.Optional(t.Boolean()),
+            },
+            // Reject legacy fields like `modifiedAction` outright instead of
+            // silently dropping them — callers that still send them are buggy.
+            { additionalProperties: false }
+          )
+        ),
+      }),
+    }
+  )
+
+  // Return the in-memory cleaned dataset as a CSV blob. The frontend uses this
+  // after "Apply selected" to upload the cleaned data back as a new dataset
+  // version, then auto-runs the workflow.
+  .get("/:id/dataguard/export-csv", ({ params: { id }, set }) => {
+    const agent = getAgent(id);
+    const dataset = agent.getDataGuardSession().getDataset();
+    if (!dataset) {
+      set.status = 404;
+      return "No dataset loaded.";
+    }
+    const escape = (v: unknown): string => {
+      if (v === null || v === undefined) return "";
+      const s = String(v);
+      return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const lines: string[] = [];
+    lines.push(dataset.columns.map(escape).join(","));
+    for (const row of dataset.rows) {
+      lines.push(dataset.columns.map(c => escape(row[c])).join(","));
+    }
+    set.headers["content-type"] = "text/csv; charset=utf-8";
+    return lines.join("\n");
+  })
+
   .get("/:id/dataguard/session", ({ params: { id } }) => {
     const agent = getAgent(id);
     const session = agent.getDataGuardSession();
@@ -354,7 +587,6 @@ const agentsRouter = new Elysia({ prefix: "/agents" })
       datasetColumnCount: dataset?.columns.length ?? 0,
       issues: session.getIssues(),
       decisionLog: session.getDecisionLog(),
-      flaggedRows: session.getFlaggedRows(),
       autoAllowRules: session.getAutoAllowRules(),
     };
   })
@@ -442,9 +674,10 @@ interface WsMessage {
   messageSource?: "chat" | "feedback";
   // Fields below carry the user's verdict on a pending-approval step.
   // Used when type === "decision". See agent/tools/dataguard/with-approval.ts.
+  // "modify" verdict was cut by #11a (it silently lied — the handler ran the
+  // original proposalParams and just logged the user's free-text).
   stepId?: string;
-  verdict?: "allow" | "deny" | "modify";
-  modifiedAction?: string;
+  verdict?: "allow" | "deny";
   remember?: boolean;
 }
 
@@ -515,7 +748,10 @@ function broadcastToAgent(agentId: string, message: WsOutgoingMessage): void {
 }
 
 export function buildApp() {
-  return new Elysia()
+  // `normalize: false` so body schemas with additionalProperties:false can
+  // reject unknown fields (Elysia 1.4 silently strips them by default — see
+  // the #11a modify-reject tests).
+  return new Elysia({ normalize: false })
     .use(cors())
     .group(env.API_PREFIX, app =>
       app
@@ -582,10 +818,27 @@ export function buildApp() {
             );
             return;
           }
+          if (msg.verdict !== "allow" && msg.verdict !== "deny") {
+            ws.send(
+              JSON.stringify({
+                type: "error",
+                error: `verdict must be "allow" or "deny" (got "${msg.verdict}")`,
+              })
+            );
+            return;
+          }
+          if (msg.verdict === "deny" && msg.remember === true) {
+            ws.send(
+              JSON.stringify({
+                type: "error",
+                error: "remember=true only applies to allow decisions",
+              })
+            );
+            return;
+          }
           const resolved = agent.resolveDecision(msg.stepId, {
             stepId: msg.stepId,
             verdict: msg.verdict,
-            modifiedAction: msg.modifiedAction,
             remember: msg.remember,
           });
           wsLog.info(
@@ -661,6 +914,12 @@ export function buildApp() {
 export function _resetAgentStoreForTests(): void {
   agentStore.clear();
   agentCounter = 0;
+}
+
+// Reach an agent by id from a test so a test can seed its DataGuardSession
+// directly (avoids running the LLM-backed /scan to set up state).
+export function _getAgentForTests(id: string): TexeraAgent | undefined {
+  return agentStore.get(id);
 }
 
 function printStartupMessage(app: ReturnType<typeof buildApp>) {

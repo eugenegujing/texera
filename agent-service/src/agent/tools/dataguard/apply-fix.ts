@@ -24,14 +24,27 @@
 
 import type { FixProposal } from "../../../types/dataguard";
 import type { DatasetView } from "./dataset";
+import { isMissing as isCellMissing } from "./missing-detection";
 
 export interface ApplyResult {
   dataset: DatasetView;
   rowsAffected: number;
-  flaggedRows: number[];
 }
 
-export function applyFix(dataset: DatasetView, proposal: FixProposal): ApplyResult {
+export interface ApplyOptions {
+  // Extra tokens — beyond the DEFAULT_MISSING_TOKENS — that should also be
+  // treated as missing. Threaded through from the user's /scan call so that
+  // a session configured with custom `missingTokens` (e.g., ["xyz"]) sees
+  // those same tokens treated as missing during `impute`. Without this,
+  // apply-fix and the profiler would silently disagree on what's missing.
+  missingTokens?: string[];
+}
+
+export function applyFix(
+  dataset: DatasetView,
+  proposal: FixProposal,
+  options: ApplyOptions = {}
+): ApplyResult {
   const rows = dataset.rows.map(r => ({ ...r }));
   let columns = [...dataset.columns];
   const params = proposal.operationParams;
@@ -39,16 +52,36 @@ export function applyFix(dataset: DatasetView, proposal: FixProposal): ApplyResu
   switch (proposal.operationKind) {
     case "replace_value": {
       const column = params.column as string;
-      const match = params.match;
       const replacement = params.replacement;
+      // Two targeting modes:
+      //   - rowIndices: deterministic, used for outlier / placeholder
+      //     where the profiler already knows exactly which rows are wrong.
+      //   - match: value-based, used for cases like "replace every 'unknown' with null".
+      // rowIndices wins when both are present. Without rowIndices support,
+      // replace_value silently no-ops whenever the LLM-supplied `match` is
+      // slightly off (e.g. 950 vs 950.0 vs "950") — that turned every outlier
+      // proposal into a byte-identical re-export, which then made LakeFS abort
+      // the version commit with "No changes detected in dataset".
+      const targetIndices = params.rowIndices as number[] | undefined;
       let affected = 0;
-      for (const r of rows) {
-        if (cellEquals(r[column], match)) {
-          r[column] = replacement;
-          affected++;
+      if (targetIndices && targetIndices.length > 0) {
+        const indexSet = new Set(targetIndices);
+        for (let i = 0; i < rows.length; i++) {
+          if (indexSet.has(i)) {
+            rows[i][column] = replacement;
+            affected++;
+          }
+        }
+      } else {
+        const match = params.match;
+        for (const r of rows) {
+          if (cellEquals(r[column], match)) {
+            r[column] = replacement;
+            affected++;
+          }
         }
       }
-      return { dataset: { columns, rows }, rowsAffected: affected, flaggedRows: [] };
+      return { dataset: { columns, rows }, rowsAffected: affected };
     }
 
     case "drop_rows": {
@@ -57,31 +90,21 @@ export function applyFix(dataset: DatasetView, proposal: FixProposal): ApplyResu
       return {
         dataset: { columns, rows: kept },
         rowsAffected: rows.length - kept.length,
-        flaggedRows: [],
       };
     }
 
     case "impute": {
       const column = params.column as string;
       const strategy = params.strategy as "mean" | "median" | "mode";
-      const fill = computeImputeValue(rows, column, strategy);
+      const fill = computeImputeValue(rows, column, strategy, options.missingTokens);
       let affected = 0;
       for (const r of rows) {
-        if (isMissing(r[column])) {
+        if (isCellMissing(r[column], options.missingTokens)) {
           r[column] = fill;
           affected++;
         }
       }
-      return { dataset: { columns, rows }, rowsAffected: affected, flaggedRows: [] };
-    }
-
-    case "flag": {
-      const indices = (params.rowIndices as number[]).slice();
-      return {
-        dataset: { columns, rows },
-        rowsAffected: indices.length,
-        flaggedRows: indices,
-      };
+      return { dataset: { columns, rows }, rowsAffected: affected };
     }
 
     case "trim_whitespace": {
@@ -97,7 +120,7 @@ export function applyFix(dataset: DatasetView, proposal: FixProposal): ApplyResu
           }
         }
       }
-      return { dataset: { columns, rows }, rowsAffected: affected, flaggedRows: [] };
+      return { dataset: { columns, rows }, rowsAffected: affected };
     }
 
     case "standardize": {
@@ -111,7 +134,7 @@ export function applyFix(dataset: DatasetView, proposal: FixProposal): ApplyResu
           affected++;
         }
       }
-      return { dataset: { columns, rows }, rowsAffected: affected, flaggedRows: [] };
+      return { dataset: { columns, rows }, rowsAffected: affected };
     }
 
     case "rename_column": {
@@ -126,7 +149,7 @@ export function applyFix(dataset: DatasetView, proposal: FixProposal): ApplyResu
           affected++;
         }
       }
-      return { dataset: { columns, rows }, rowsAffected: affected, flaggedRows: [] };
+      return { dataset: { columns, rows }, rowsAffected: affected };
     }
 
     default:
@@ -144,23 +167,20 @@ function cellEquals(a: unknown, b: unknown): boolean {
   return false;
 }
 
-function isMissing(v: unknown): boolean {
-  if (v === null || v === undefined) return true;
-  if (typeof v === "number" && Number.isNaN(v)) return true;
-  if (typeof v === "string" && v === "") return true;
-  return false;
-}
-
 function computeImputeValue(
   rows: Record<string, unknown>[],
   column: string,
-  strategy: "mean" | "median" | "mode"
+  strategy: "mean" | "median" | "mode",
+  missingTokens?: string[]
 ): unknown {
   const numericValues: number[] = [];
   const stringCounts = new Map<string, number>();
   for (const r of rows) {
     const v = r[column];
-    if (isMissing(v)) continue;
+    // Honor the session's missingTokens override so impute treats the exact
+    // same set of cells as missing that the profiler flagged. Without this,
+    // the user sees "NULL"/"N/A" still in the cleaned CSV after Fix-and-run.
+    if (isCellMissing(v, missingTokens)) continue;
     if (typeof v === "number" && Number.isFinite(v)) {
       numericValues.push(v);
     } else if (typeof v === "string") {

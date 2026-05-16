@@ -86,7 +86,7 @@ export interface ReActStep {
    */
   pendingApproval?: {
     toolName: string;
-    riskTier: "low" | "medium" | "high";
+    riskTier: "low" | "medium" | "high" | "warning";
     proposal: {
       issueId: string;
       issueType: string;

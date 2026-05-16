@@ -43,9 +43,16 @@ export async function requestApproval(
   gateway: ApprovalGateway,
   proposal: FixProposal
 ): Promise<PermissionDecision> {
-  // High-risk fixes ALWAYS prompt — the "remember" rule does not apply.
+  // `high` and `warning` ALWAYS prompt — the "remember" rule does not apply.
   // This is the same shape Claude Code uses for destructive Bash operations.
-  if (proposal.riskTier !== "high" && gateway.matchesAutoAllowRule(proposal.issueType)) {
+  //
+  // `warning` exists specifically because the agent is *not* confident enough
+  // to act without a human eyeball (e.g., outliers that might be real extreme
+  // values). Letting an "Allow & remember placeholder_value" rule from earlier
+  // in the session auto-approve a warning-tier fix would defeat the whole
+  // point of the tier.
+  const alwaysPrompt = proposal.riskTier === "high" || proposal.riskTier === "warning";
+  if (!alwaysPrompt && gateway.matchesAutoAllowRule(proposal.issueType)) {
     return { stepId: "", verdict: "auto_allow_remembered" };
   }
   if (proposal.riskTier === "low") {

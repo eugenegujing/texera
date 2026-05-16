@@ -36,5 +36,9 @@
 <texera-agent-panel
   *ngIf="copilotEnabled"
   [agentIdToActivate]="agentIdToActivate"></texera-agent-panel>
+<!-- DataGuard quality-issue checklist. Separate from the chat — issues are
+     server-scanned, user picks via checkboxes, applied in a single batch
+     without going through the LLM ReAct loop. -->
+<texera-dataguard-checklist *ngIf="copilotEnabled"></texera-dataguard-checklist>
 <texera-property-editor></texera-property-editor>
 <ng-template #codeEditor></ng-template>

@@ -57,6 +57,54 @@ describe("applyFix", () => {
     expect(result.dataset.rows[3].age).toBe(null);
   });
 
+  test("replace_value with rowIndices: targets rows by index, ignores cell value", () => {
+    // Regression for the "No changes detected in dataset" LakeFS error: when
+    // the LLM proposed `match` that didn't equal the cell exactly (rounding,
+    // string-vs-number, etc.), cellEquals silently no-op'd and the exported
+    // CSV was byte-identical → version commit aborted. rowIndices is the
+    // deterministic escape hatch used by outlier proposals.
+    const ds: DatasetView = {
+      columns: ["glucose"],
+      rows: [{ glucose: 100 }, { glucose: 949.7 }, { glucose: 120 }, { glucose: 815.3 }],
+    };
+    const result = applyFix(
+      ds,
+      makeProposal({
+        operationKind: "replace_value",
+        operationParams: { column: "glucose", rowIndices: [1, 3], replacement: 110 },
+      })
+    );
+    expect(result.rowsAffected).toBe(2);
+    expect(result.dataset.rows[0].glucose).toBe(100);
+    expect(result.dataset.rows[1].glucose).toBe(110);
+    expect(result.dataset.rows[2].glucose).toBe(120);
+    expect(result.dataset.rows[3].glucose).toBe(110);
+  });
+
+  test("replace_value: rowIndices wins when both rowIndices and match are present", () => {
+    // Deterministic precedence: if both are supplied (legacy LLM output),
+    // honor the index-based targeting since match is the fragile path.
+    const ds: DatasetView = {
+      columns: ["x"],
+      rows: [{ x: 1 }, { x: 2 }, { x: 3 }],
+    };
+    const result = applyFix(
+      ds,
+      makeProposal({
+        operationKind: "replace_value",
+        operationParams: {
+          column: "x",
+          rowIndices: [0],
+          match: 999, // would match nothing — only rowIndices should win
+          replacement: 99,
+        },
+      })
+    );
+    expect(result.rowsAffected).toBe(1);
+    expect(result.dataset.rows[0].x).toBe(99);
+    expect(result.dataset.rows[1].x).toBe(2);
+  });
+
   test("replace_value: original dataset is not mutated", () => {
     const ds: DatasetView = {
       columns: ["age"],
@@ -140,6 +188,88 @@ describe("applyFix", () => {
     expect(result.dataset.rows[2].v).toBe(4);
   });
 
+  test("impute: treats profiler missing-tokens (N/A, NULL, null, Unknown, whitespace) as missing", () => {
+    // Regression: apply-fix's isMissing used to only recognize null/undefined/NaN/""
+    // while the profiler flagged "N/A", "NULL", "null", "Unknown" as missing. Result:
+    // after Fix-and-run, the cleaned CSV still contained those literal tokens because
+    // impute silently skipped them. Both sides must agree.
+    const ds: DatasetView = {
+      columns: ["glucose"],
+      rows: [
+        { glucose: 100 },
+        { glucose: "NULL" },
+        { glucose: 120 },
+        { glucose: "null" },
+        { glucose: "N/A" },
+        { glucose: " " },
+        { glucose: 140 },
+      ],
+    };
+    const result = applyFix(
+      ds,
+      makeProposal({
+        operationKind: "impute",
+        operationParams: { column: "glucose", strategy: "median" },
+      })
+    );
+    // 4 missing tokens replaced; non-missing observations [100, 120, 140] → median 120.
+    expect(result.rowsAffected).toBe(4);
+    expect(result.dataset.rows[1].glucose).toBe(120);
+    expect(result.dataset.rows[3].glucose).toBe(120);
+    expect(result.dataset.rows[4].glucose).toBe(120);
+    expect(result.dataset.rows[5].glucose).toBe(120);
+  });
+
+  test("impute mode: missing-token strings are not counted as mode candidates", () => {
+    // "NULL" appearing twice must not be voted the mode just because it's the
+    // most frequent string — it's a missing-marker, not data.
+    const ds: DatasetView = {
+      columns: ["group"],
+      rows: [
+        { group: "A" },
+        { group: "NULL" },
+        { group: "A" },
+        { group: "NULL" },
+        { group: "B" },
+        { group: null },
+      ],
+    };
+    const result = applyFix(
+      ds,
+      makeProposal({
+        operationKind: "impute",
+        operationParams: { column: "group", strategy: "mode" },
+      })
+    );
+    expect(result.dataset.rows[1].group).toBe("A");
+    expect(result.dataset.rows[3].group).toBe("A");
+    expect(result.dataset.rows[5].group).toBe("A");
+  });
+
+  test("impute respects session-supplied missingTokens override", () => {
+    // Regression for the missingTokens-not-threaded bug: a user who set
+    // {missingTokens: ["xyz"]} at scan time would have rows whose value is
+    // literally "xyz" flagged by the profiler but silently skipped by impute
+    // (which only knew about the default tokens). Threading ApplyOptions
+    // through fixes this.
+    const ds: DatasetView = {
+      columns: ["v"],
+      rows: [{ v: 1 }, { v: "xyz" }, { v: 3 }, { v: "xyz" }, { v: 5 }],
+    };
+    const result = applyFix(
+      ds,
+      makeProposal({
+        operationKind: "impute",
+        operationParams: { column: "v", strategy: "median" },
+      }),
+      { missingTokens: ["xyz"] }
+    );
+    // Non-missing values [1, 3, 5] → median 3, both "xyz" cells replaced.
+    expect(result.rowsAffected).toBe(2);
+    expect(result.dataset.rows[1].v).toBe(3);
+    expect(result.dataset.rows[3].v).toBe(3);
+  });
+
   test("impute mode: fills missing with most common string", () => {
     const ds: DatasetView = {
       columns: ["c"],
@@ -157,24 +287,6 @@ describe("applyFix", () => {
     expect(result.rowsAffected).toBe(2);
     expect(result.dataset.rows[3].c).toBe("A");
     expect(result.dataset.rows[4].c).toBe("A");
-  });
-
-  test("flag: does not mutate rows, populates flaggedRows", () => {
-    const ds: DatasetView = {
-      columns: ["x"],
-      rows: [{ x: 1 }, { x: 2 }, { x: 3 }],
-    };
-    const result = applyFix(
-      ds,
-      makeProposal({
-        operationKind: "flag",
-        operationParams: { rowIndices: [0, 2] },
-      })
-    );
-    expect(result.rowsAffected).toBe(2);
-    expect(result.flaggedRows).toEqual([0, 2]);
-    expect(result.dataset.rows[0].x).toBe(1);
-    expect(result.dataset.rows[2].x).toBe(3);
   });
 
   test("trim_whitespace: trims string cells in target column", () => {

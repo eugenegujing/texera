@@ -179,6 +179,24 @@ i {
   }
 }
 
+#dataguard-toggle-button {
+  flex: 0 0 auto;
+  margin-right: 8px;
+  min-width: 36px;
+
+  // Make the active state unmistakable — a dark-blue "lit" shield with a
+  // tinted background so users can tell at a glance that DataGuard is on.
+  &.dataguard-toggle--on {
+    background-color: #e6f4ff;
+    border-color: #69b1ff;
+    color: #0050b3;
+
+    i {
+      font-size: 18px;
+    }
+  }
+}
+
 texera-user-icon {
   margin-left: 10px;
 }

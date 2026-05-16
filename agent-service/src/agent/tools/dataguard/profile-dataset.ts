@@ -22,6 +22,13 @@
 
 import type { DataQualityIssue } from "../../../types/dataguard";
 import type { DatasetView } from "./dataset";
+import {
+  DEFAULT_MISSING_TOKENS,
+  DEFAULT_PLACEHOLDERS,
+  isMissing as isCellMissing,
+  placeholderHit,
+  toNumber,
+} from "./missing-detection";
 
 export interface ProfileOptions {
   // Column to treat as a unique identifier; duplicates flagged as duplicate_id.
@@ -34,28 +41,11 @@ export interface ProfileOptions {
   missingTokens?: string[];
   // Above this row count, affectedRowIndices is omitted from the issue.
   maxIndicesInIssue?: number;
+  // Max distinct values a string column may have before inconsistent-label
+  // detection skips it (free-text columns will hit this and be ignored).
+  // Default 20. Set to 0 to disable label detection entirely.
+  inconsistentLabelMaxCardinality?: number;
 }
-
-// Placeholders are sentinel *values* that look like data but are actually
-// "no value." Kept distinct from missing-tokens to avoid double-flagging
-// the same cell under two issue types.
-const DEFAULT_PLACEHOLDERS: Array<string | number> = [
-  999,
-  -1,
-  "unknown",
-  "Unknown",
-];
-
-// Tokens that mean "no data was recorded." Empty string is always treated
-// as missing without needing to be listed.
-const DEFAULT_MISSING_TOKENS: string[] = [
-  "NA",
-  "N/A",
-  "n/a",
-  "null",
-  "NULL",
-  "None",
-];
 
 const DEFAULT_MAX_INDICES_IN_ISSUE = 50;
 
@@ -69,37 +59,8 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-function isMissing(value: unknown, missingTokens: string[]): boolean {
-  if (value === null || value === undefined) return true;
-  if (typeof value === "number" && Number.isNaN(value)) return true;
-  if (typeof value === "string") {
-    if (value === "") return true;
-    if (missingTokens.includes(value)) return true;
-  }
-  return false;
-}
-
-function toNumber(value: unknown): number | undefined {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && value.trim() !== "") {
-    const n = Number(value);
-    if (Number.isFinite(n)) return n;
-  }
-  return undefined;
-}
-
-function placeholderHit(
-  value: unknown,
-  placeholders: Array<string | number>
-): string | number | undefined {
-  for (const p of placeholders) {
-    if (typeof p === "string" && typeof value === "string" && p === value) return p;
-    if (typeof p === "number") {
-      const n = toNumber(value);
-      if (n !== undefined && n === p) return p;
-    }
-  }
-  return undefined;
+function isMissing(value: unknown, missingTokens: ReadonlyArray<string>): boolean {
+  return isCellMissing(value, missingTokens);
 }
 
 function maybeIndices(
@@ -107,6 +68,26 @@ function maybeIndices(
   cap: number
 ): number[] | undefined {
   return indices.length <= cap ? indices : undefined;
+}
+
+// Guess which column is the row identifier when the caller didn't specify one.
+// Conservative: only matches columns whose names look unambiguously like IDs.
+// Tries the cheapest, most-specific patterns first so e.g. `sample_id` wins
+// over a generic `id_card` column elsewhere in the schema. Returns undefined
+// when nothing matches — the caller skips dup-ID detection in that case.
+function inferIdColumn(columns: ReadonlyArray<string>): string | undefined {
+  const matchers: Array<(name: string) => boolean> = [
+    name => /^id$/i.test(name),
+    name => /_id$/i.test(name),
+    name => /^id_/i.test(name),
+    name => /Id$/.test(name),
+    name => /^.+_uid$/i.test(name) || /^uid$/i.test(name),
+  ];
+  for (const m of matchers) {
+    const hit = columns.find(c => m(c));
+    if (hit) return hit;
+  }
+  return undefined;
 }
 
 export function profileDataset(
@@ -119,9 +100,9 @@ export function profileDataset(
   const detectedAt = nowIso();
   const issues: DataQualityIssue[] = [];
 
-  // Pre-compute placeholder hits per row/column so out_of_range can avoid
-  // double-counting and missing-value can avoid flagging a row that has a
-  // string placeholder like "N/A" twice.
+  // Pre-compute placeholder hits per row/column so outlier-detection can
+  // skip rows already flagged elsewhere and missing-value can avoid flagging
+  // a row that has a string placeholder like "N/A" twice.
   const placeholderHitByColRow = new Map<string, Map<number, string | number>>();
   for (const col of dataset.columns) {
     const map = new Map<number, string | number>();
@@ -170,9 +151,14 @@ export function profileDataset(
     });
   }
 
-  // Duplicate-ID detector (only when idColumn is configured and exists).
-  if (options.idColumn && dataset.columns.includes(options.idColumn)) {
-    const idCol = options.idColumn;
+  // Duplicate-ID detector. Honors options.idColumn when set; otherwise tries
+  // to infer one from column names (e.g. "sample_id" → use it). Without this
+  // inference the auto-trigger's empty-body /scan would never find dup IDs in
+  // user datasets — users don't configure scan options through the checklist UI.
+  const idCol = options.idColumn && dataset.columns.includes(options.idColumn)
+    ? options.idColumn
+    : inferIdColumn(dataset.columns);
+  if (idCol) {
     const positions = new Map<string, number[]>();
     for (let i = 0; i < dataset.rows.length; i++) {
       const v = dataset.rows[i][idCol];
@@ -205,28 +191,103 @@ export function profileDataset(
     }
   }
 
-  // Out-of-range detector — skips rows already flagged as placeholders so we
-  // don't surface the same row under two issue types.
+  // Inconsistent-label detector. For each low-cardinality string column,
+  // group raw values by a normalized key (trim + lowercase). If two or more
+  // raw spellings collapse to the same key, every row using a non-canonical
+  // spelling is flagged. Example: "Male"/"male"/"M" all map to "m"/"male"
+  // depending on key choice. We use trim+lowercase so "Yes"/"yes"/" yes "
+  // collide as expected.
+  const labelMaxCardinality = options.inconsistentLabelMaxCardinality ?? 20;
+  if (labelMaxCardinality > 0) {
+    for (const col of dataset.columns) {
+      const placeholderHits = placeholderHitByColRow.get(col)!;
+      // Count distinct non-missing, non-placeholder string values.
+      const raw = new Map<string, number[]>();
+      let nonStringSeen = false;
+      for (let i = 0; i < dataset.rows.length; i++) {
+        if (placeholderHits.has(i)) continue;
+        const v = dataset.rows[i][col];
+        if (isMissing(v, missingTokens)) continue;
+        if (typeof v !== "string") {
+          nonStringSeen = true;
+          continue;
+        }
+        const list = raw.get(v);
+        if (list) list.push(i);
+        else raw.set(v, [i]);
+      }
+      if (nonStringSeen || raw.size === 0 || raw.size > labelMaxCardinality) continue;
+
+      // Group by normalized key. A key with >1 raw spelling = inconsistent.
+      const groups = new Map<string, { canonical: string; spellings: Set<string>; rows: number[] }>();
+      for (const [rawValue, rows] of raw) {
+        const key = rawValue.trim().toLowerCase();
+        const existing = groups.get(key);
+        if (existing) {
+          existing.spellings.add(rawValue);
+          existing.rows.push(...rows);
+          // Prefer the most common spelling as canonical (heuristic).
+          if (rows.length > (raw.get(existing.canonical)?.length ?? 0)) {
+            existing.canonical = rawValue;
+          }
+        } else {
+          groups.set(key, { canonical: rawValue, spellings: new Set([rawValue]), rows: [...rows] });
+        }
+      }
+      const inconsistentRows: number[] = [];
+      const examples: string[] = [];
+      for (const g of groups.values()) {
+        if (g.spellings.size > 1) {
+          // Flag every row that uses a non-canonical spelling.
+          for (const [rawValue, rows] of raw) {
+            if (rawValue !== g.canonical && g.spellings.has(rawValue)) {
+              inconsistentRows.push(...rows);
+            }
+          }
+          examples.push(`{${Array.from(g.spellings).join(" / ")}}`);
+        }
+      }
+      if (inconsistentRows.length === 0) continue;
+      inconsistentRows.sort((a, b) => a - b);
+      issues.push({
+        issueId: nextIssueId(),
+        issueType: "inconsistent_label",
+        column: col,
+        description: `${inconsistentRows.length} row(s) in ${col} use non-canonical label spellings`,
+        evidence: `Mixed spellings (showing up to 3): ${examples.slice(0, 3).join(", ")}`,
+        affectedRowCount: inconsistentRows.length,
+        affectedRowIndices: maybeIndices(inconsistentRows, indexCap),
+        detectedAt,
+      });
+    }
+  }
+
+  // Outlier detector — values that fall outside a user-supplied hard range.
+  // We deliberately do NOT auto-detect outliers via z-score: legitimate
+  // consecutive large readings (e.g. clusters of high glucose in a clinical
+  // dataset) would be flagged en masse. Requires the caller to opt in by
+  // providing validRanges per column. Skips rows already flagged as
+  // placeholders so the same row doesn't surface under two issue types.
   if (options.validRanges) {
     for (const [col, range] of Object.entries(options.validRanges)) {
       if (!dataset.columns.includes(col)) continue;
       const placeholderHits = placeholderHitByColRow.get(col)!;
-      const oorIndices: number[] = [];
+      const outlierIndices: number[] = [];
       for (let i = 0; i < dataset.rows.length; i++) {
         if (placeholderHits.has(i)) continue;
         const v = toNumber(dataset.rows[i][col]);
         if (v === undefined) continue;
-        if (v < range.min || v > range.max) oorIndices.push(i);
+        if (v < range.min || v > range.max) outlierIndices.push(i);
       }
-      if (oorIndices.length === 0) continue;
+      if (outlierIndices.length === 0) continue;
       issues.push({
         issueId: nextIssueId(),
-        issueType: "out_of_range",
+        issueType: "outlier",
         column: col,
-        description: `${oorIndices.length} row(s) in ${col} fall outside [${range.min}, ${range.max}]`,
-        evidence: `Valid range: [${range.min}, ${range.max}]; violations: ${oorIndices.length}.`,
-        affectedRowCount: oorIndices.length,
-        affectedRowIndices: maybeIndices(oorIndices, indexCap),
+        description: `${outlierIndices.length} row(s) in ${col} fall outside the valid range [${range.min}, ${range.max}]`,
+        evidence: `Valid range: [${range.min}, ${range.max}]; violations: ${outlierIndices.length}.`,
+        affectedRowCount: outlierIndices.length,
+        affectedRowIndices: maybeIndices(outlierIndices, indexCap),
         detectedAt,
       });
     }

@@ -17,7 +17,9 @@
  * under the License.
  */
 
-import { ChangeDetectorRef, Component, Input, OnChanges, OnInit, SimpleChanges } from "@angular/core";
+import { ChangeDetectorRef, Component, Input, OnChanges, OnDestroy, OnInit, SimpleChanges } from "@angular/core";
+import { Subject, race, timer } from "rxjs";
+import { filter, take } from "rxjs/operators";
 import { NzModalRef, NzModalService } from "ng-zorro-antd/modal";
 import {
   NzTableQueryParams,
@@ -40,6 +42,7 @@ import { DomSanitizer, SafeHtml } from "@angular/platform-browser";
 import { ResultExportationComponent } from "../../result-exportation/result-exportation.component";
 import { WorkflowStatusService } from "../../../service/workflow-status/workflow-status.service";
 import { GuiConfigService } from "../../../../common/service/gui-config.service";
+import { DataGuardRowNavigatorService } from "../../../service/agent/data-guard-row-navigator.service";
 import { NgIf, NgFor, NgClass } from "@angular/common";
 import { NzSpaceCompactItemDirective } from "ng-zorro-antd/space";
 import { NzInputDirective } from "ng-zorro-antd/input";
@@ -80,7 +83,10 @@ import { NzIconDirective } from "ng-zorro-antd/icon";
     NzCellEllipsisDirective,
   ],
 })
-export class ResultTableFrameComponent implements OnInit, OnChanges {
+export class ResultTableFrameComponent implements OnInit, OnChanges, OnDestroy {
+  // DataGuard locate-row highlight duration. Must match the SCSS animation
+  // (which is set to iteration-count: infinite + clears when the class drops).
+  private static readonly HIGHLIGHT_DURATION_MS = 2000;
   @Input() operatorId?: string;
 
   // display result table
@@ -109,6 +115,17 @@ export class ResultTableFrameComponent implements OnInit, OnChanges {
   widthPercent: string = "";
   isOperatorFinished: boolean = false;
 
+  // DataGuard "show this row" highlight. Indexed in *page* coordinates so we
+  // can match against the same `let i = index` the *ngFor uses.
+  highlightedRowIndexInPage: number | null = null;
+  highlightedColumn: string | null = null;
+  private highlightTimer: ReturnType<typeof setTimeout> | null = null;
+  // Fires (with pageIndex) after a paginated page has been rendered into the
+  // table. The DataGuard locate-flow waits on this — semantically "I want to
+  // know when the page is shown" rather than "when the HTTP responds" — so
+  // we never double-subscribe to the cold `selectPage` Observable.
+  private readonly pageRendered$ = new Subject<number>();
+
   constructor(
     private modalService: NzModalService,
     private workflowActionService: WorkflowActionService,
@@ -117,7 +134,8 @@ export class ResultTableFrameComponent implements OnInit, OnChanges {
     private changeDetectorRef: ChangeDetectorRef,
     private sanitizer: DomSanitizer,
     private workflowStatusService: WorkflowStatusService,
-    private guiConfigService: GuiConfigService
+    private guiConfigService: GuiConfigService,
+    private dataGuardRowNavigator: DataGuardRowNavigatorService
   ) {}
 
   ngOnChanges(changes: SimpleChanges): void {
@@ -203,6 +221,74 @@ export class ResultTableFrameComponent implements OnInit, OnChanges {
       const paginatedResultService = this.workflowResultService.getPaginatedResultService(this.operatorId);
       if (paginatedResultService) {
       }
+    }
+
+    // DataGuard checklist row click → page to + flash the affected row.
+    // Only honored for this frame's operator; other ResultTableFrames ignore.
+    this.dataGuardRowNavigator
+      .getNav$()
+      .pipe(untilDestroyed(this))
+      .subscribe(req => {
+        if (!this.operatorId || req.operatorId !== this.operatorId) {
+          return;
+        }
+        // Capture operator at click time. The frame's `operatorId` can change
+        // before the async page-load completes (user switches operators); we
+        // bail in applyFlash if the frame is no longer showing this request's
+        // operator. pageSize is intentionally NOT captured — recomputed inside
+        // applyFlash so a panel resize between click and apply takes effect.
+        const requestOperatorId = req.operatorId;
+        const applyFlash = () => {
+          if (this.operatorId !== requestOperatorId) return;
+          const targetPage = DataGuardRowNavigatorService.pageIndexFor(req.rowIndex, this.pageSize);
+          const rowInPage = req.rowIndex - (targetPage - 1) * this.pageSize;
+          this.highlightedRowIndexInPage = rowInPage;
+          this.highlightedColumn = req.column ?? null;
+          this.changeDetectorRef.detectChanges();
+          if (this.highlightTimer !== null) {
+            clearTimeout(this.highlightTimer);
+          }
+          this.highlightTimer = setTimeout(() => {
+            this.highlightedRowIndexInPage = null;
+            this.highlightedColumn = null;
+            this.highlightTimer = null;
+            this.changeDetectorRef.detectChanges();
+          }, ResultTableFrameComponent.HIGHLIGHT_DURATION_MS);
+        };
+        // Compute target page once, off the freshest pageSize. (Reviewer 2:
+        // applyFlash recomputes too, but that branch only runs after the
+        // page-rendered round-trip, so a panel resize in flight still picks
+        // up the new pageSize there.)
+        const targetPage = DataGuardRowNavigatorService.pageIndexFor(req.rowIndex, this.pageSize);
+        if (this.currentPageIndex !== targetPage) {
+          this.currentPageIndex = targetPage;
+          // Wait on the *post-render* signal — not the cold selectPage
+          // Observable — so we don't trigger a duplicate HTTP fetch and so
+          // the flash lands after setupResultTable + detectChanges complete.
+          // race() against a generous timeout so a never-completing render
+          // (e.g., user navigates away) doesn't strand the flash forever.
+          race(
+            this.pageRendered$.pipe(
+              filter(p => p === targetPage),
+              take(1)
+            ),
+            timer(3000)
+          )
+            .pipe(take(1), untilDestroyed(this))
+            .subscribe(() => applyFlash());
+          this.changePaginatedResultData();
+        } else {
+          applyFlash();
+        }
+      });
+  }
+
+  ngOnDestroy(): void {
+    // @UntilDestroy handles RxJS subs but not raw timers — clear so the late
+    // callback can't fire detectChanges() on a destroyed view (NG0911).
+    if (this.highlightTimer !== null) {
+      clearTimeout(this.highlightTimer);
+      this.highlightTimer = null;
     }
   }
 
@@ -377,6 +463,7 @@ export class ResultTableFrameComponent implements OnInit, OnChanges {
   // 1. result panel is opened - must display currently selected page
   // 2. user selects a new page - must display new page data
   // 3. current page is dirty - must re-fetch data
+  //
   changePaginatedResultData(): void {
     if (!this.operatorId) {
       return;
@@ -393,6 +480,9 @@ export class ResultTableFrameComponent implements OnInit, OnChanges {
         if (this.currentPageIndex === pageData.pageIndex) {
           this.setupResultTable(pageData.table, paginatedResultService.getCurrentTotalNumTuples());
           this.changeDetectorRef.detectChanges();
+          // Signal page-rendered AFTER setup + CD so the locate-flow's flash
+          // lands on the freshly rendered rows, not stale ones.
+          this.pageRendered$.next(pageData.pageIndex);
         }
       });
   }

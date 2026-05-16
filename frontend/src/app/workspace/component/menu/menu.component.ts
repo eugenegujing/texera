@@ -55,6 +55,7 @@ import { ComputingUnitStatusService } from "../../../common/service/computing-un
 import { ComputingUnitState } from "../../../common/type/computing-unit-connection.interface";
 import { ComputingUnitSelectionComponent } from "../power-button/computing-unit-selection.component";
 import { GuiConfigService } from "../../../common/service/gui-config.service";
+import { DataGuardSettingsService } from "../../service/agent/data-guard-settings.service";
 import { DashboardWorkflowComputingUnit } from "../../../common/type/workflow-computing-unit";
 import { Privilege } from "../../../dashboard/type/share-access.interface";
 import { MarkdownDescriptionComponent } from "../../../dashboard/component/user/markdown-description/markdown-description.component";
@@ -189,7 +190,8 @@ export class MenuComponent implements OnInit, OnDestroy {
     private panelService: PanelService,
     private computingUnitStatusService: ComputingUnitStatusService,
     protected config: GuiConfigService,
-    private router: Router
+    private router: Router,
+    public dataGuardSettings: DataGuardSettingsService
   ) {
     workflowWebsocketService
       .subscribeToEvent("ExecutionDurationUpdateEvent")
@@ -470,6 +472,35 @@ export class MenuComponent implements OnInit, OnDestroy {
 
   public onClickAddCommentBox(): void {
     this.workflowActionService.addCommentBox(this.workflowUtilService.getNewCommentBox());
+  }
+
+  /**
+   * DataGuard toolbar toggle — defaults to ON for every workflow.
+   * The shield button reads `isDataGuardEnabled` for its icon theme and
+   * tooltip; clicking it flips the state.
+   *
+   * Reads from `DataGuardSettingsService` (persists per-workflow in
+   * localStorage). When OFF, `DataGuardAutoTriggerService` skips its
+   * orchestration pipeline.
+   */
+  public get isDataGuardEnabled(): boolean {
+    const wid = this.workflowActionService.getWorkflowMetadata()?.wid;
+    // No workflow id yet (unsaved) → treat as enabled-by-default; the
+    // toggle itself becomes meaningful once the workflow is saved.
+    if (wid === undefined) return true;
+    return this.dataGuardSettings.isEnabled(wid);
+  }
+
+  public onToggleDataGuard(): void {
+    const wid = this.workflowActionService.getWorkflowMetadata()?.wid;
+    if (wid === undefined) {
+      this.notificationService.warning(
+        "Save the workflow first — DataGuard's setting is stored per workflow."
+      );
+      return;
+    }
+    const next = this.dataGuardSettings.toggle(wid);
+    this.notificationService.info(`DataGuard auto-scan is now ${next ? "ON" : "OFF"} for this workflow.`);
   }
 
   public handleKill(): void {

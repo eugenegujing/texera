@@ -45,6 +45,11 @@
   color: #cf1322;
 }
 
+.dg-permission__tier--warning {
+  background: #ffe7ba;
+  color: #ad4e00;
+}
+
 .dg-permission__body {
   margin: 8px 0;
 }
@@ -66,13 +71,4 @@
   gap: 8px;
   margin-top: 8px;
   flex-wrap: wrap;
-}
-
-.dg-permission__modify {
-  margin-top: 8px;
-
-  textarea {
-    width: 100%;
-    margin-bottom: 8px;
-  }
 }

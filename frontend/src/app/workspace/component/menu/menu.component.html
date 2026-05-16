@@ -360,6 +360,28 @@
           nzType="ellipsis"></i>
       </button>
 
+      <!-- DataGuard auto-scan toggle. Kept outside the utilities template so
+           it doesn't get clipped by overflow:hidden when the toolbar is tight.
+           Defaults to ON per workflow; OFF skips DataGuardAutoTriggerService
+           so adding a CSVFileScan does nothing. Persists in localStorage.
+           Icon: safety-certificate (exists in both outline + twotone — plain
+           "safety" only has an outline variant, so twotone renders blank). -->
+      <button
+        (click)="onToggleDataGuard()"
+        nz-button
+        nz-tooltip
+        id="dataguard-toggle-button"
+        [class.dataguard-toggle--on]="isDataGuardEnabled"
+        [nzTooltipTitle]="isDataGuardEnabled
+          ? 'DataGuard auto-scan: ON (click to disable for this workflow)'
+          : 'DataGuard auto-scan: OFF (click to re-enable)'">
+        <i
+          nz-icon
+          [nzType]="isDataGuardEnabled ? 'safety-certificate' : 'safety'"
+          [nzTheme]="isDataGuardEnabled ? 'twotone' : 'outline'"
+          nzTwotoneColor="#0050b3"></i>
+      </button>
+
       <nz-space-compact id="execution-buttons">
         <texera-computing-unit-selection id="texera-compute-unit-selection"> </texera-computing-unit-selection>
         <button

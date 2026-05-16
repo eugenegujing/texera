@@ -155,10 +155,12 @@
       <tbody>
         <tr
           *ngFor="let row of basicTable.data; let i = index"
-          class="table-row-hover">
+          class="table-row-hover"
+          [class.dg-row-highlight]="i === highlightedRowIndexInPage">
           <td
             *ngFor="let column of currentColumns; let columnIndex = index"
             class="table-cell"
+            [class.dg-cell-highlight]="i === highlightedRowIndexInPage && (column.columnDef === highlightedColumn || column.header === highlightedColumn)"
             nzEllipsis
             (click)="open(i, row)">
             <span class="cell-content">{{ column.getCell(row) }}</span>

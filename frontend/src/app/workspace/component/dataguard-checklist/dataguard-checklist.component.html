@@ -1,0 +1,160 @@
+<!-- cdkDragBoundary keeps the panel inside the viewport so a user can't drag
+     it behind the toolbar / off-screen and lose access to the close button. -->
+<div class="dg-panel" *ngIf="isOpen" cdkDrag cdkDragBoundary="body">
+  <!-- Header doubles as the drag handle. -->
+  <div class="dg-panel__header" cdkDragHandle>
+    <span class="dg-panel__title">
+      <i nz-icon nzType="safety-certificate" nzTheme="twotone" nzTwotoneColor="#0050b3"></i>
+      DataGuard
+    </span>
+    <span class="dg-panel__status">{{ statusBadge() }}</span>
+    <button
+      nz-button
+      nzType="text"
+      nzSize="small"
+      class="dg-panel__close"
+      (click)="onClose()"
+      title="Dismiss checklist">
+      <i nz-icon nzType="close"></i>
+    </button>
+  </div>
+
+  <!-- Subheader: dataset summary + message -->
+  <div class="dg-panel__sub">
+    <ng-container *ngIf="scan.datasetSource">
+      We checked <strong>{{ scan.datasetRows }} rows</strong> in
+      <code>{{ scan.datasetSource }}</code>.
+    </ng-container>
+    <div *ngIf="scan.message" class="dg-panel__message">{{ scan.message }}</div>
+  </div>
+
+  <!-- Empty state during scanning -->
+  <div *ngIf="scan.state === 'scanning'" class="dg-panel__empty">
+    <i nz-icon nzType="loading"></i>&nbsp;Looking for problems in your data…
+  </div>
+
+  <!-- Empty state when scan finished with 0 issues -->
+  <div *ngIf="scan.state === 'ready' && scan.entries.length === 0" class="dg-panel__empty dg-panel__empty--clean">
+    <i nz-icon nzType="check-circle" nzTheme="twotone"></i>
+    Your data looks good — nothing to fix.
+  </div>
+
+  <!-- Category roll-up: helps users see what *kinds* of mistakes the file has
+       at a glance ("3 Missing values · 2 Placeholder values · 1 Out-of-range value"). -->
+  <div
+    *ngIf="scan.state === 'ready' && scan.entries.length > 0"
+    class="dg-panel__categories">
+    <span
+      *ngFor="let c of categorySummary(); let last = last"
+      class="dg-panel__category-chip">
+      {{ c.count }} {{ c.label }}{{ c.count === 1 ? "" : "s" }}<span *ngIf="!last" class="dg-panel__category-sep">·</span>
+    </span>
+  </div>
+
+  <!-- Bulk-action toolbar (only when ready and there are issues) -->
+  <div
+    *ngIf="scan.state === 'ready' && scan.entries.length > 0"
+    class="dg-panel__bulk">
+    <span>{{ selectedCount }} to fix · {{ deniedCount }} skipped</span>
+    <span class="dg-panel__bulk-actions">
+      <button nz-button nzSize="small" (click)="onSelectAll()">Fix all</button>
+      <button nz-button nzSize="small" (click)="onDenyAll()">Skip all</button>
+    </span>
+  </div>
+
+  <!-- Checklist of issues -->
+  <ul class="dg-panel__list" *ngIf="scan.entries.length > 0">
+    <li
+      *ngFor="let entry of scan.entries"
+      class="dg-row"
+      [class.dg-row--deny]="entry.verdict === 'deny'"
+      [class.dg-row--allow]="entry.verdict === 'allow'"
+      [class.dg-row--error]="entry.error">
+      <div class="dg-row__head">
+        <label
+          nz-checkbox
+          [nzChecked]="entry.verdict === 'allow'"
+          [nzDisabled]="entry.verdict === 'deny' || !!entry.error"
+          (nzCheckedChange)="onToggleAllow(entry, $event)">
+          <span class="dg-row__category">{{ categoryLabel(entry) }}</span>
+          <span class="dg-row__action">{{ entry.proposal?.action || entry.issue.description }}</span>
+        </label>
+        <span class="dg-row__tier dg-row__tier--{{ riskTierLabel(entry) }}">
+          {{ riskTierLabel(entry) }}
+        </span>
+      </div>
+
+      <div class="dg-row__details">
+        <button
+          type="button"
+          class="dg-row__locate"
+          (click)="onShowInResultPanel(entry)"
+          [title]="locateTooltip(entry)">
+          <i nz-icon nzType="environment" nzTheme="outline"></i>
+          In column <b>{{ entry.issue.column }}</b> · affects {{ entry.issue.affectedRowCount }} row(s)
+        </button>
+        <div class="dg-row__field" *ngIf="entry.proposal">{{ entry.proposal.reason }}</div>
+        <div class="dg-row__field dg-row__field--error" *ngIf="entry.error">
+          ⚠ We couldn't suggest a fix for this one. You can skip it.
+        </div>
+      </div>
+
+      <!-- Row footer: Deny button + "remember" toggle -->
+      <div class="dg-row__foot">
+        <button
+          nz-button
+          nzType="text"
+          nzSize="small"
+          [disabled]="entry.verdict === 'deny' || !!entry.error"
+          (click)="onDeny(entry)">
+          <i nz-icon nzType="close-circle"></i>&nbsp;Skip
+        </button>
+        <label
+          *ngIf="!!entry.proposal && riskTierLabel(entry) !== 'high' && riskTierLabel(entry) !== 'warning'"
+          nz-checkbox
+          [nzChecked]="!!entry.remember"
+          [nzDisabled]="entry.verdict !== 'allow'"
+          (nzCheckedChange)="onToggleRemember(entry, $event)"
+          class="dg-row__remember">
+          Always do this
+        </label>
+      </div>
+    </li>
+  </ul>
+
+  <!-- Footer: Apply Selected -->
+  <div class="dg-panel__foot" *ngIf="scan.state === 'ready' && scan.entries.length > 0">
+    <button
+      nz-button
+      nzType="primary"
+      [disabled]="selectedCount === 0 && deniedCount === 0"
+      (click)="onApplySelected()">
+      Fix {{ selectedCount }} & run
+      <span *ngIf="deniedCount > 0">&nbsp;(skip {{ deniedCount }})</span>
+    </button>
+  </div>
+
+  <div class="dg-panel__foot dg-panel__foot--split" *ngIf="scan.state === 'done' || scan.state === 'error'">
+    <button
+      nz-button
+      nzType="default"
+      (click)="onRescan()"
+      [disabled]="isRescanning"
+      title="Re-run DataGuard on the current dataset version. Useful if the AI missed something the first time.">
+      <i nz-icon nzType="reload" [nzSpin]="isRescanning"></i>&nbsp;Scan again
+    </button>
+    <button nz-button nzType="primary" (click)="onClose()">Close</button>
+  </div>
+</div>
+
+<!-- Floating DataGuard icon, shown when the panel is closed but the shield
+     toggle in the toolbar is ON. Click triggers a fresh scan against the
+     current canvas. Hidden entirely when the user has turned DataGuard off. -->
+<button
+  *ngIf="showFloater"
+  type="button"
+  class="dg-floater"
+  (click)="onFloaterClick()"
+  title="Scan the current dataset operator with DataGuard">
+  <i nz-icon nzType="safety-certificate" nzTheme="twotone" nzTwotoneColor="#0050b3"></i>
+</button>

@@ -59,11 +59,12 @@ function createProfileDatasetTool(ctx: DataGuardToolContext) {
   return tool({
     description: `Scan the loaded dataset for quality issues. Read-only.
 
-Detects four categories:
+Detects five categories:
 - missing_value: null / empty / configured missing tokens
 - placeholder_value: numeric (999, -1) or string sentinels
 - duplicate_id: requires idColumn hint
-- out_of_range: requires validRanges hint per column
+- outlier: requires validRanges hint per column — flags numeric values outside [min, max]. The earlier z-score variant was removed because it flagged legitimate consecutive large readings.
+- inconsistent_label: low-cardinality string columns where trim+lowercase keys collide on multiple raw spellings (e.g. "Male"/"male"/"MALE")
 
 Call this once at the start of a DataGuard run. Returns a JSON array of DataQualityIssue records.`,
     inputSchema: z.object({
@@ -74,7 +75,7 @@ Call this once at the start of a DataGuard run. Returns a JSON array of DataQual
       validRanges: z
         .record(z.string(), z.object({ min: z.number(), max: z.number() }))
         .optional()
-        .describe("Per-column valid numeric range. Values outside are flagged as out_of_range."),
+        .describe("Per-column valid numeric range. Values outside are flagged as outlier."),
       placeholderValues: z
         .array(z.union([z.string(), z.number()]))
         .optional()
@@ -135,7 +136,13 @@ function createApplyFixTool(ctx: DataGuardToolContext) {
   return tool({
     description: `Apply a previously-proposed fix to the dataset. MUTATING — gated by user approval.
 
-Pass the issueId. The proposal stored from suggest_fix is looked up automatically. For risk tier "low" the fix is auto-applied with a summary line; for "medium" / "high" the user must approve through the chat panel. The result includes the user's verdict.`,
+Pass the issueId. The proposal stored from suggest_fix is looked up automatically. Risk-tier behaviour:
+- "low": auto-applied with a summary line (no prompt).
+- "medium": user must approve through the chat panel; "Allow & remember" is offered so future similar fixes auto-apply.
+- "high": user must approve every time; "remember" is NOT offered (always-ask, e.g. drop_rows).
+- "warning": user must approve every time; "remember" is NOT offered. Used for fixes that are concrete but where domain judgement is required (e.g. outlier clamping that might destroy a real extreme value).
+
+The result includes the user's verdict.`,
     inputSchema: z.object({
       issueId: z.string().describe("The issueId whose proposal should be applied."),
     }),
@@ -160,25 +167,19 @@ Pass the issueId. The proposal stored from suggest_fix is looked up automaticall
         });
       }
 
-      // For modify, MVP keeps the original operationKind/params but records the
-      // user's free-text override in the log. Future iteration can parse the
-      // modifiedAction back into a structured proposal override.
-      const modifiedAction = decision.verdict === "modify" ? decision.modifiedAction : undefined;
-
       try {
-        const result = applyFix(dataset, proposal);
+        const result = applyFix(dataset, proposal, {
+          missingTokens: ctx.session.getScanOptions().missingTokens,
+        });
         ctx.session.updateDataset(result.dataset);
-        if (result.flaggedRows.length > 0) ctx.session.addFlaggedRows(result.flaggedRows);
         ctx.session.recordDecision({
           proposal,
           verdict: decision.verdict,
-          modifiedAction,
           applied: true,
         });
         return JSON.stringify({
           verdict: decision.verdict,
           rowsAffected: result.rowsAffected,
-          flaggedRows: result.flaggedRows,
           datasetRowCount: result.dataset.rows.length,
           message: `Applied ${proposal.operationKind}. Rows affected: ${result.rowsAffected}.`,
         });

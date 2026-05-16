@@ -272,6 +272,21 @@ export class TexeraAgent implements ApprovalGateway {
     return this.state;
   }
 
+  /**
+   * Stateless LLM call used by DataGuard's server-driven /scan endpoint.
+   * Bypasses the ReAct loop (no tool calls, no step recording) — just sends
+   * a prompt to the configured model and returns its text response. Used to
+   * generate FixProposals server-side without going through the chat panel.
+   */
+  public async callLlm(prompt: string): Promise<string> {
+    const result = await generateText({
+      model: this.model,
+      prompt,
+      temperature: 0.2,
+    });
+    return result.text;
+  }
+
   getWorkflowState(): WorkflowState {
     return this.workflowState;
   }

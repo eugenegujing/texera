@@ -24,28 +24,15 @@
     </div>
   </div>
 
-  <div class="dg-permission__actions" *ngIf="!isModifying">
+  <div class="dg-permission__actions">
     <button nz-button nzType="primary" (click)="onAllow(false)">Allow</button>
     <button
       nz-button
-      *ngIf="step.pendingApproval.riskTier !== 'high'"
+      *ngIf="step.pendingApproval.riskTier !== 'high' && step.pendingApproval.riskTier !== 'warning'"
       (click)="onAllow(true)">
       Allow &amp; don't ask for similar
     </button>
     <button nz-button (click)="onDeny()">Deny</button>
-    <button nz-button (click)="openModify()">Modify…</button>
-  </div>
-
-  <div class="dg-permission__modify" *ngIf="isModifying">
-    <textarea
-      nz-input
-      rows="3"
-      [(ngModel)]="modifiedAction"
-      placeholder="Describe the modified action (e.g., 'Flag for manual review instead of impute')"></textarea>
-    <div class="dg-permission__actions">
-      <button nz-button nzType="primary" (click)="submitModify()">Submit modification</button>
-      <button nz-button (click)="cancelModify()">Cancel</button>
-    </div>
   </div>
 </div>
 

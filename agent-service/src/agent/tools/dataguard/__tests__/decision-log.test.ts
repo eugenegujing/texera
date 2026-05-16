@@ -38,9 +38,12 @@ function entry(overrides: Partial<DecisionLogEntry> = {}): DecisionLogEntry {
 
 describe("serializeDecisionLogCsv", () => {
   test("empty log returns header only", () => {
+    // The `modified_action` column was removed by #11a (Modify verdict cut);
+    // the canonical 9-column header lives below — `decision-log-no-modify.test.ts`
+    // also locks this contract from the opposite direction.
     const csv = serializeDecisionLogCsv([]);
     expect(csv.split("\n")).toEqual([
-      "decision_id,timestamp,issue_type,target_rows,proposed_action,user_decision,modified_action,reason,confidence,applied_at",
+      "decision_id,timestamp,issue_type,target_rows,proposed_action,user_decision,reason,confidence,applied_at",
     ]);
   });
 
@@ -65,13 +68,14 @@ describe("serializeDecisionLogCsv", () => {
     expect(dataRow).toContain('"line1\nline2"');
   });
 
-  test("missing appliedAt and modifiedAction render as empty fields", () => {
+  test("missing appliedAt renders as an empty trailing field", () => {
+    // Post-#11a the schema is 9 cols; appliedAt is the last and can be blank
+    // for denied decisions (nothing was applied).
     const csv = serializeDecisionLogCsv([
       entry({ userDecision: "deny", appliedAt: undefined }),
     ]);
     const row = csv.split("\n")[1];
-    expect(row.endsWith(",")).toBe(true); // appliedAt is the last column and is empty
-    expect(row).toContain(",,"); // modifiedAction is empty between reason+confidence's neighbors
+    expect(row.endsWith(",")).toBe(true);
   });
 
   test("multiple rows preserve insertion order", () => {

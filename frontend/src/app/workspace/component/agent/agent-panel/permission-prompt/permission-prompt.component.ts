@@ -19,9 +19,7 @@
 
 import { Component, Input } from "@angular/core";
 import { NgIf } from "@angular/common";
-import { FormsModule } from "@angular/forms";
 import { NzButtonComponent } from "ng-zorro-antd/button";
-import { NzInputDirective } from "ng-zorro-antd/input";
 import { ReActStep } from "../../../../service/agent/agent-types";
 import { AgentService } from "../../../../service/agent/agent.service";
 
@@ -34,7 +32,7 @@ import { AgentService } from "../../../../service/agent/agent.service";
 @Component({
   selector: "texera-permission-prompt",
   standalone: true,
-  imports: [NgIf, FormsModule, NzButtonComponent, NzInputDirective],
+  imports: [NgIf, NzButtonComponent],
   templateUrl: "./permission-prompt.component.html",
   styleUrls: ["./permission-prompt.component.scss"],
 })
@@ -42,8 +40,6 @@ export class PermissionPromptComponent {
   @Input() step!: ReActStep;
   @Input() agentId!: string;
 
-  public isModifying = false;
-  public modifiedAction = "";
   public submitted = false;
 
   constructor(private readonly agentService: AgentService) {}
@@ -58,23 +54,5 @@ export class PermissionPromptComponent {
     if (this.submitted) return;
     this.submitted = true;
     this.agentService.sendDecision(this.agentId, this.step.id, "deny");
-  }
-
-  public openModify(): void {
-    if (this.submitted) return;
-    this.isModifying = true;
-    this.modifiedAction = this.step.pendingApproval?.proposal.action ?? "";
-  }
-
-  public submitModify(): void {
-    if (this.submitted) return;
-    this.submitted = true;
-    this.agentService.sendDecision(this.agentId, this.step.id, "modify", {
-      modifiedAction: this.modifiedAction,
-    });
-  }
-
-  public cancelModify(): void {
-    this.isModifying = false;
   }
 }

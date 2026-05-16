@@ -112,17 +112,26 @@ describe("requestApproval", () => {
     expect(decision.verdict).toBe("deny");
   });
 
-  test("'modify' verdict carries through with the modifiedAction", async () => {
+  test("warning tier: prompts every time even with a remembered rule", async () => {
+    // The whole point of `warning` is "we have a concrete fix but need human
+    // judgement". A remembered rule from earlier in the session must NOT
+    // auto-approve it — otherwise the warning tier becomes pointless.
     const gw = new MockGateway();
-    const promise = requestApproval(gw, makeProposal({ riskTier: "medium" }));
-    gw.resolveLater("mock-step-1", {
-      stepId: "mock-step-1",
-      verdict: "modify",
-      modifiedAction: "Flag instead of replace",
-    });
+    gw.rules.add("outlier");
+    const promise = requestApproval(gw, makeProposal({ issueType: "outlier", riskTier: "warning" }));
+    expect(gw.emitted).toHaveLength(1);
+    gw.resolveLater("mock-step-1", { stepId: "mock-step-1", verdict: "allow" });
     const decision = await promise;
-    expect(decision.verdict).toBe("modify");
-    expect(decision.modifiedAction).toBe("Flag instead of replace");
+    expect(decision.verdict).toBe("allow");
+  });
+
+  test("warning tier without a remembered rule: still prompts (no auto_allow_low_risk)", async () => {
+    const gw = new MockGateway();
+    const promise = requestApproval(gw, makeProposal({ riskTier: "warning" }));
+    expect(gw.emitted).toHaveLength(1);
+    gw.resolveLater("mock-step-1", { stepId: "mock-step-1", verdict: "deny" });
+    const decision = await promise;
+    expect(decision.verdict).toBe("deny");
   });
 
   test("a decision that arrives before the tool awaits is buffered and delivered", async () => {
