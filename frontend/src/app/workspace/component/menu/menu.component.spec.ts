@@ -34,7 +34,7 @@ import { UserService } from "../../../common/service/user/user.service";
 import { StubUserService } from "../../../common/service/user/stub-user.service";
 import { commonTestProviders } from "../../../common/testing/test-utils";
 import { ExecuteWorkflowService } from "../../service/execute-workflow/execute-workflow.service";
-import { WorkflowActionService } from "../../service/workflow-graph/model/workflow-action.service";
+import { DEFAULT_WORKFLOW, WorkflowActionService } from "../../service/workflow-graph/model/workflow-action.service";
 import { ValidationWorkflowService, ValidationOutput } from "../../service/validation/validation-workflow.service";
 import { PanelService } from "../../service/panel/panel.service";
 import { WorkflowVersionService } from "../../../dashboard/service/user/workflow-version/workflow-version.service";
@@ -46,7 +46,9 @@ import { mockPoint, mockScanPredicate } from "../../service/workflow-graph/model
 import { saveAs } from "file-saver";
 import type { ModalOptions } from "ng-zorro-antd/modal";
 import type { ComputingUnitSelectionComponent } from "../power-button/computing-unit-selection.component";
-import { WorkflowContent } from "../../../common/type/workflow";
+import { Workflow, WorkflowContent } from "../../../common/type/workflow";
+import type { WorkflowMetadata } from "../../../dashboard/type/workflow-metadata.interface";
+import type { NzUploadFile } from "ng-zorro-antd/upload";
 import { Router } from "@angular/router";
 import { USER_WORKFLOW } from "../../../app-routing.constant";
 import type { Mocked } from "vitest";
@@ -390,6 +392,137 @@ describe("MenuComponent", () => {
       expect(fileNameArg).toBe("my-workflow.json");
       expect(blobArg).toBeInstanceOf(Blob);
       expect(blobArg.type).toBe("text/plain;charset=utf-8");
+    });
+  });
+
+  // Regression coverage for the import-duplicate bug: importing a workflow file
+  // used to fabricate metadata with `wid: undefined` and a file-derived name, so
+  // the auto-persist created a brand-new duplicate workflow instead of saving
+  // into the currently opened one (and stomped description / published state).
+  // Import must replace only the content and keep every metadata field intact.
+  describe("onClickImportWorkflow (import)", () => {
+    const existingMetadata: WorkflowMetadata = {
+      name: "existing workflow",
+      description: "existing description",
+      wid: 42,
+      creationTime: 1000,
+      lastModifiedTime: 2000,
+      isPublished: 1,
+      readonly: false,
+    };
+
+    const importedContent = {
+      operators: [{ operatorID: "imported-op" }],
+      operatorPositions: { "imported-op": { x: 1, y: 2 } },
+      links: [],
+      commentBoxes: [],
+      settings: {},
+    } as unknown as WorkflowContent;
+
+    // onClickImportWorkflow reads the file through an async FileReader, so tests
+    // hand it a real File and await the spy they expect to fire.
+    function importFile(fileContent: string, fileName = "imported-file.json"): boolean {
+      const file = new File([fileContent], fileName, { type: "application/json" }) as unknown as NzUploadFile;
+      return component.onClickImportWorkflow(file);
+    }
+
+    it("preserves the current workflow metadata and only replaces the content", async () => {
+      workflowActionService.setWorkflowMetadata(existingMetadata);
+      const reloadSpy = vi.spyOn(workflowActionService, "reloadWorkflow").mockImplementation(() => {});
+
+      importFile(JSON.stringify(importedContent));
+
+      await vi.waitFor(() => expect(reloadSpy).toHaveBeenCalledTimes(1));
+      const imported = reloadSpy.mock.calls[0][0] as Workflow;
+      expect(imported.wid).toBe(42);
+      expect(imported.name).toBe("existing workflow");
+      expect(imported.description).toBe("existing description");
+      expect(imported.isPublished).toBe(1);
+      expect(imported.creationTime).toBe(1000);
+      expect(imported.lastModifiedTime).toBe(2000);
+      expect(imported.readonly).toBe(false);
+      expect(imported.content).toEqual(importedContent);
+    });
+
+    it("reloads with the parsed file content and async rendering enabled", async () => {
+      const reloadSpy = vi.spyOn(workflowActionService, "reloadWorkflow").mockImplementation(() => {});
+
+      const returnValue = importFile(JSON.stringify(importedContent));
+
+      await vi.waitFor(() => expect(reloadSpy).toHaveBeenCalledTimes(1));
+      expect((reloadSpy.mock.calls[0][0] as Workflow).content).toEqual(importedContent);
+      expect(reloadSpy.mock.calls[0][1]).toBe(true);
+      // returning false stops nz-upload from also uploading the file
+      expect(returnValue).toBe(false);
+    });
+
+    it("clears the undo and redo stacks after a successful import", async () => {
+      vi.spyOn(workflowActionService, "reloadWorkflow").mockImplementation(() => {});
+      const clearUndoSpy = vi.spyOn(component.undoRedoService, "clearUndoStack");
+      const clearRedoSpy = vi.spyOn(component.undoRedoService, "clearRedoStack");
+
+      importFile(JSON.stringify(importedContent));
+
+      await vi.waitFor(() => expect(clearUndoSpy).toHaveBeenCalled());
+      expect(clearRedoSpy).toHaveBeenCalled();
+    });
+
+    it("notifies an error and does not reload when the file is not valid JSON", async () => {
+      const reloadSpy = vi.spyOn(workflowActionService, "reloadWorkflow").mockImplementation(() => {});
+      const errorSpy = vi.spyOn(notificationService, "error").mockImplementation(() => {});
+      vi.spyOn(console, "error").mockImplementation(() => {});
+
+      importFile("this is not json");
+
+      await vi.waitFor(() => expect(errorSpy).toHaveBeenCalledTimes(1));
+      expect(errorSpy.mock.calls[0][0]).toContain("importing the workflow");
+      expect(reloadSpy).not.toHaveBeenCalled();
+    });
+
+    it("passes a new object to reloadWorkflow instead of the live metadata reference", async () => {
+      // setWorkflowMetadata early-returns on reference equality, so handing the
+      // live metadata object back to reloadWorkflow would silently swallow the
+      // metadata-changed broadcast; the spread must guarantee a fresh object.
+      workflowActionService.setWorkflowMetadata(existingMetadata);
+      const reloadSpy = vi.spyOn(workflowActionService, "reloadWorkflow").mockImplementation(() => {});
+
+      importFile(JSON.stringify(importedContent));
+
+      await vi.waitFor(() => expect(reloadSpy).toHaveBeenCalledTimes(1));
+      expect(reloadSpy.mock.calls[0][0]).not.toBe(workflowActionService.getWorkflowMetadata());
+    });
+
+    it("keeps the default metadata when importing into a brand-new unsaved workspace", async () => {
+      // Resetting with undefined deterministically restores DEFAULT_WORKFLOW.
+      workflowActionService.setWorkflowMetadata(undefined);
+      const reloadSpy = vi.spyOn(workflowActionService, "reloadWorkflow").mockImplementation(() => {});
+
+      importFile(JSON.stringify(importedContent), "some-pipeline.json");
+
+      await vi.waitFor(() => expect(reloadSpy).toHaveBeenCalledTimes(1));
+      const imported = reloadSpy.mock.calls[0][0] as Workflow;
+      // Even in an unsaved workspace the file name must not become the workflow name.
+      expect(imported.wid).toBe(DEFAULT_WORKFLOW.wid);
+      expect(imported.name).toBe(DEFAULT_WORKFLOW.name);
+    });
+
+    it("notifies an error and leaves undo/redo untouched when reload fails on malformed content", async () => {
+      // Valid JSON that is not a valid WorkflowContent has no schema validation;
+      // reloadWorkflow throwing is the only signal, and the outer try/catch must
+      // skip the stack clearing that sits after it inside the try block.
+      vi.spyOn(workflowActionService, "reloadWorkflow").mockImplementation(() => {
+        throw new Error("malformed workflow content");
+      });
+      const errorSpy = vi.spyOn(notificationService, "error").mockImplementation(() => {});
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const clearUndoSpy = vi.spyOn(component.undoRedoService, "clearUndoStack");
+      const clearRedoSpy = vi.spyOn(component.undoRedoService, "clearRedoStack");
+
+      importFile("{}");
+
+      await vi.waitFor(() => expect(errorSpy).toHaveBeenCalledTimes(1));
+      expect(clearUndoSpy).not.toHaveBeenCalled();
+      expect(clearRedoSpy).not.toHaveBeenCalled();
     });
   });
 

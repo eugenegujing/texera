@@ -21,10 +21,7 @@ import { DatePipe, Location, NgIf, NgFor, NgTemplateOutlet } from "@angular/comm
 import { Component, ElementRef, Input, OnDestroy, OnInit, ViewChild } from "@angular/core";
 import { Router, RouterLink } from "@angular/router";
 import { UserService } from "../../../common/service/user/user.service";
-import {
-  DEFAULT_WORKFLOW_NAME,
-  WorkflowPersistService,
-} from "../../../common/service/workflow-persist/workflow-persist.service";
+import { WorkflowPersistService } from "../../../common/service/workflow-persist/workflow-persist.service";
 import { Workflow, WorkflowContent } from "../../../common/type/workflow";
 import { ExecuteWorkflowService } from "../../service/execute-workflow/execute-workflow.service";
 import { UndoRedoService } from "../../service/undo-redo/undo-redo.service";
@@ -596,27 +593,13 @@ export class MenuComponent implements OnInit, OnDestroy {
 
         const workflowContent = JSON.parse(result) as WorkflowContent;
 
-        // set the workflow name using the file name without the extension
-        const fileExtensionIndex = file.name.lastIndexOf(".");
-        var workflowName: string;
-        if (fileExtensionIndex === -1) {
-          workflowName = file.name;
-        } else {
-          workflowName = file.name.substring(0, fileExtensionIndex);
-        }
-        if (workflowName.trim() === "") {
-          workflowName = DEFAULT_WORKFLOW_NAME;
-        }
-
+        // Import replaces only the content of the currently opened workflow.
+        // Keeping the existing metadata (wid, name, description, isPublished, ...)
+        // ensures the auto-persist saves into this workflow instead of creating
+        // a duplicate one with a fresh wid.
         const workflow: Workflow = {
+          ...this.workflowActionService.getWorkflowMetadata(),
           content: workflowContent,
-          name: workflowName,
-          description: undefined,
-          wid: undefined,
-          creationTime: undefined,
-          lastModifiedTime: undefined,
-          readonly: false,
-          isPublished: 0,
         };
 
         this.workflowActionService.enableWorkflowModification();
